@@ -2,13 +2,6 @@
 
 A real-time ray tracer for glass: refraction with dispersion, forward-splatted floor caustics, and a cascaded irradiance cache for the indirect bounce. Three separate backends - Apple Metal, Vulkan 1.2+, and OpenGL 4.3+ Core - share the scene definition and the mesh loader.
 
-<p align="left">
-  <a href="https://www.instagram.com/blacklineinteractive"><img src="https://img.shields.io/badge/Instagram-E4405F?style=for-the-badge&logo=instagram&logoColor=white" alt="Instagram" /></a>
-  <a href="https://t.me/blacklineinteractive"><img src="https://img.shields.io/badge/Telegram-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram" /></a>
-  <a href="https://youtube.com/@blacklineinteractive"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube" /></a>
-  <a href="https://www.linkedin.com/in/blacklineinteractive"><img src="https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn" /></a>
-</p>
-
 ![Realistic Glass Cascade GI](media/1_Realistic_Glass_Cascade_GI.png)
 
 ---
@@ -47,13 +40,6 @@ Created and maintained by **Blackline Interactive**:
   <a href="https://youtube.com/@blacklineinteractive"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube" /></a>
   <a href="https://www.linkedin.com/in/blacklineinteractive"><img src="https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn" /></a>
 </p>
-
-| Platform | Link | Description |
-| :--- | :--- | :--- |
-| **Instagram** | [@blacklineinteractive](https://www.instagram.com/blacklineinteractive) | Visual dev logs & graphics demos |
-| **Telegram** | [t.me/blacklineinteractive](https://t.me/blacklineinteractive) | Community & project updates |
-| **YouTube** | [@blacklineinteractive](https://youtube.com/@blacklineinteractive) | Real-time benchmarks & video breakdowns |
-| **LinkedIn** | [blacklineinteractive](https://www.linkedin.com/in/blacklineinteractive) | Professional network & engineering |
 
 ---
 
