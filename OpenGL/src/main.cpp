@@ -431,9 +431,8 @@ void renderFrameGL(OpenGLRenderer &r, float deltaTime) {
 }
 
 int runHeadlessGL(OpenGLRenderer &r) {
-    std::cout << "\n=================================================================\n";
-    std::cout << "  Radiance Cascades Glass: OpenGL Automated Benchmark\n";
-    std::cout << "=================================================================\n";
+    std::cout << "\nOpenGL, " << r.width << "x" << r.height
+              << ", 20 frames per mode after 3 warm-up frames\n";
 
     system("mkdir -p output");
 
@@ -441,14 +440,13 @@ int runHeadlessGL(OpenGLRenderer &r) {
         uint32_t mode;
         std::string name;
         std::string filename;
-        std::string description;
     };
 
     std::vector<ModeTest> modes = {
-        { 1, "Mode 1: Realistic Glass + Caustics", "rc_glass_gl_scene.png", "Snell refraction + Fresnel + Cauchy dispersion + floor caustics" },
-        { 2, "Mode 2: Frosted / Rough Glass Cascade", "rc_glass_gl_frosted.png", "Micro-roughness transmission cone + diffused caustic filter" },
-        { 3, "Mode 3: High Spectral Dispersion Prism", "rc_glass_gl_dispersion.png", "Amplified dispersion on Newton's prism & crystal sphere" },
-        { 0, "Mode 0: Whitted RT Baseline", "rc_glass_gl_whitted.png", "Classic binary shadow ray (zero caustics, dark shadow)" }
+        { 1, "clear glass", "rc_glass_gl_scene.png" },
+        { 2, "frosted glass", "rc_glass_gl_frosted.png" },
+        { 3, "high dispersion", "rc_glass_gl_dispersion.png" },
+        { 0, "whitted baseline", "rc_glass_gl_whitted.png" }
     };
 
     for (const auto &test : modes) {
@@ -473,13 +471,11 @@ int runHeadlessGL(OpenGLRenderer &r) {
         std::string outPath = "output/" + test.filename;
         saveGLTextureToPNG(r.outTexture, r.width, r.height, outPath);
 
-        std::cout << ">>> " << test.name << "\n";
-        std::cout << "    " << test.description << "\n";
-        std::cout << "    [Perf] " << avgFrameMs << " ms (" << fps << " FPS)\n";
-        std::cout << "    [Output] " << outPath << "\n\n";
+        std::cout << "  mode " << test.mode << "  " << test.name
+                  << "  " << avgFrameMs << " ms (" << fps << " fps)"
+                  << "  -> " << outPath << "\n";
     }
 
-    std::cout << "OpenGL Benchmark complete.\n";
     return 0;
 }
 
@@ -613,9 +609,7 @@ int main(int argc, const char *argv[]) {
     glfwSetScrollCallback(gGL.window, scrollCallback);
     glfwSetKeyCallback(gGL.window, keyCallback);
 
-    std::cout << "=================================================================\n";
-    std::cout << "  Radiance Cascades Glass & Caustics Engine [OpenGL 4.3]\n";
-    std::cout << "=================================================================\n";
+    std::cout << "Radiance Cascades Glass & Caustics [OpenGL 4.3]\n\n";
     std::cout << "  Controls:\n";
     std::cout << "    [Left Mouse Drag]   : Orbit Camera\n";
     std::cout << "    [Alt + Drag]        : Pan Camera\n";
@@ -629,8 +623,7 @@ int main(int argc, const char *argv[]) {
     std::cout << "    [+/-]               : Adjust Roughness\n";
     std::cout << "    [R]                 : Reset Camera\n";
     std::cout << "    [S]                 : Screenshot\n";
-    std::cout << "    [ESC]               : Quit\n";
-    std::cout << "=================================================================\n\n";
+    std::cout << "    [ESC]               : Quit\n\n";
 
     gGL.lastFrameTime = glfwGetTime();
 

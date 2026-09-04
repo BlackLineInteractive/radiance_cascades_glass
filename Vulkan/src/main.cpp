@@ -752,9 +752,8 @@ static void readbackImage(VulkanRenderer &r, std::vector<float> &outPixels) {
 }
 
 int runHeadlessVK(VulkanRenderer &r) {
-    std::cout << "\n=================================================================\n";
-    std::cout << "  Radiance Cascades Glass: Vulkan Automated Benchmark\n";
-    std::cout << "=================================================================\n";
+    std::cout << "\nVulkan, " << r.width << "x" << r.height
+              << ", 20 frames per mode after 3 warm-up frames\n";
 
     system("mkdir -p output");
 
@@ -762,14 +761,13 @@ int runHeadlessVK(VulkanRenderer &r) {
         uint32_t mode;
         std::string name;
         std::string filename;
-        std::string description;
     };
 
     std::vector<ModeTest> modes = {
-        { 1, "Mode 1: Realistic Glass + Caustics", "rc_glass_vk_scene.png", "Snell refraction + Fresnel + Cauchy dispersion + floor caustics" },
-        { 2, "Mode 2: Frosted / Rough Glass Cascade", "rc_glass_vk_frosted.png", "Micro-roughness transmission cone + diffused caustic filter" },
-        { 3, "Mode 3: High Spectral Dispersion Prism", "rc_glass_vk_dispersion.png", "Amplified dispersion on Newton's prism & crystal sphere" },
-        { 0, "Mode 0: Whitted RT Baseline", "rc_glass_vk_whitted.png", "Classic binary shadow ray (zero caustics, dark shadow)" }
+        { 1, "clear glass", "rc_glass_vk_scene.png" },
+        { 2, "frosted glass", "rc_glass_vk_frosted.png" },
+        { 3, "high dispersion", "rc_glass_vk_dispersion.png" },
+        { 0, "whitted baseline", "rc_glass_vk_whitted.png" }
     };
 
     for (const auto &test : modes) {
@@ -795,13 +793,11 @@ int runHeadlessVK(VulkanRenderer &r) {
         std::string outPath = "output/" + test.filename;
         saveFloatBufferToPNG(pixels.data(), r.width, r.height, outPath);
 
-        std::cout << ">>> " << test.name << "\n";
-        std::cout << "    " << test.description << "\n";
-        std::cout << "    [Perf] " << avgFrameMs << " ms (" << fps << " FPS)\n";
-        std::cout << "    [Output] " << outPath << "\n\n";
+        std::cout << "  mode " << test.mode << "  " << test.name
+                  << "  " << avgFrameMs << " ms (" << fps << " fps)"
+                  << "  -> " << outPath << "\n";
     }
 
-    std::cout << "Vulkan Benchmark complete.\n";
     return 0;
 }
 
@@ -845,9 +841,7 @@ int main(int argc, const char *argv[]) {
         return 1;
     }
 
-    std::cout << "=================================================================\n";
-    std::cout << "  Radiance Cascades Glass & Caustics Engine [Vulkan 1.2]\n";
-    std::cout << "=================================================================\n";
+    std::cout << "Radiance Cascades Glass & Caustics [Vulkan 1.2]\n\n";
     std::cout << "  Controls:\n";
     std::cout << "    [Space]             : Toggle Sun Animation\n";
     std::cout << "    [1]                 : Clear Glass Mode\n";
@@ -856,8 +850,7 @@ int main(int argc, const char *argv[]) {
     std::cout << "    [0]                 : Whitted Ray Tracing Baseline\n";
     std::cout << "    [+/-]               : Adjust Roughness\n";
     std::cout << "    [S]                 : Screenshot\n";
-    std::cout << "    [ESC]               : Quit\n";
-    std::cout << "=================================================================\n\n";
+    std::cout << "    [ESC]               : Quit\n\n";
 
     double lastTime = glfwGetTime();
 

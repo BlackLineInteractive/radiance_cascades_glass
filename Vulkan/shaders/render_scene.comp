@@ -178,11 +178,11 @@ void main() {
                 if (primaryHit.objectId == 10u) {
                     exitOk = intersectTeapotBVH(insideRay, uniforms.numTeapotNodes, tExit, nExit);
                 } else if (primaryHit.objectId == 11u) {
-                    exitOk = intersectSphere(insideRay, kSphereCenter, kSphereRadius, tExit, nExit);
+                    exitOk = intersectSphere(insideRay, kSphereCenter, kSphereRadius, 0.001, tExit, nExit);
                 } else if (primaryHit.objectId == 12u) {
-                    exitOk = intersectCylinder(insideRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, tExit, nExit);
+                    exitOk = intersectCylinder(insideRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, 0.001, tExit, nExit);
                 } else {
-                    exitOk = intersectTriangularPrism(insideRay, kPrismCenter, kPrismSide, kPrismHeight, tExit, nExit);
+                    exitOk = intersectTriangularPrism(insideRay, kPrismCenter, kPrismSide, kPrismHeight, 0.001, tExit, nExit);
                 }
 
                 if (exitOk) {
@@ -237,15 +237,15 @@ void main() {
                 if (primaryHit.objectId == 10u) {
                     exitOk = intersectTeapotBVH(insideRayG, uniforms.numTeapotNodes, tExit, nExit);
                 } else if (primaryHit.objectId == 11u) {
-                    exitOk = intersectSphere(insideRayG, kSphereCenter, kSphereRadius, tExit, nExit);
+                    exitOk = intersectSphere(insideRayG, kSphereCenter, kSphereRadius, 0.001, tExit, nExit);
                 } else if (primaryHit.objectId == 12u) {
-                    exitOk = intersectCylinder(insideRayG, kCylinderCenter, kCylinderRadius, kCylinderHeight, tExit, nExit);
+                    exitOk = intersectCylinder(insideRayG, kCylinderCenter, kCylinderRadius, kCylinderHeight, 0.001, tExit, nExit);
                 } else if (primaryHit.objectId == 13u) {
-                    exitOk = intersectTriangularPrism(insideRayG, kPrismCenter, kPrismSide, kPrismHeight, tExit, nExit);
+                    exitOk = intersectTriangularPrism(insideRayG, kPrismCenter, kPrismSide, kPrismHeight, 0.001, tExit, nExit);
                 } else {
                     vec3 slabMin = vec3(1.00, 0.0, 0.35);
                     vec3 slabMax = vec3(1.70, 0.06, 1.05);
-                    exitOk = intersectBox(insideRayG, slabMin, slabMax, tExit, nExit);
+                    exitOk = intersectBox(insideRayG, slabMin, slabMax, 0.001, tExit, nExit);
                 }
 
                 if (exitOk) {

@@ -1,9 +1,8 @@
-// Linear GPU BVH traversal using a fixed 64-depth stack with near-child sorting and interval bounds [tMin, tMax]
 bool intersectTeapotBVHInterval(Ray ray, float tMin, float tMax, uint numNodes, out float tHit, out vec3 hitNormal) {
     if (numNodes == 0u) return false;
 
-    // Linear BVH traversal using a fixed 64-depth stack
-    int stack[64];
+    const int kStackSize = 64;
+    int stack[kStackSize];
     int stackPtr = 0;
     stack[stackPtr++] = 0;
 
@@ -40,7 +39,8 @@ bool intersectTeapotBVHInterval(Ray ray, float tMin, float tMax, uint numNodes, 
             bool hitL = intersectBoxFast(ray, bvhNodes[node.leftChild].bmin.xyz, bvhNodes[node.leftChild].bmax.xyz, tNearL);
             bool hitR = intersectBoxFast(ray, bvhNodes[node.rightChild].bmin.xyz, bvhNodes[node.rightChild].bmax.xyz, tNearR);
 
-            if (hitL && hitR) {
+            if (hitL && hitR && stackPtr + 2 <= kStackSize) {
+                // Push the far child first so the near one pops next.
                 if (tNearL < tNearR) {
                     stack[stackPtr++] = node.rightChild;
                     stack[stackPtr++] = node.leftChild;
@@ -48,9 +48,9 @@ bool intersectTeapotBVHInterval(Ray ray, float tMin, float tMax, uint numNodes, 
                     stack[stackPtr++] = node.leftChild;
                     stack[stackPtr++] = node.rightChild;
                 }
-            } else if (hitL) {
+            } else if (hitL && stackPtr < kStackSize) {
                 stack[stackPtr++] = node.leftChild;
-            } else if (hitR) {
+            } else if (hitR && stackPtr < kStackSize) {
                 stack[stackPtr++] = node.rightChild;
             }
         }
@@ -199,8 +199,8 @@ HitRecord intersectSceneInterval(Ray ray, float tMin, float tMax, bool testGlass
             hit.absorption = vec3(0.04, 0.04, 0.04);
         }
 
-        if (intersectSphere(ray, kSphereCenter, kSphereRadius, t, norm)) {
-            if (t >= tMin && t < hit.distance) {
+        if (intersectSphere(ray, kSphereCenter, kSphereRadius, tMin, t, norm)) {
+            if (t < hit.distance) {
                 hit.hit = true;
                 hit.distance = t;
                 hit.position = ray.origin + ray.direction * t;
@@ -215,8 +215,8 @@ HitRecord intersectSceneInterval(Ray ray, float tMin, float tMax, bool testGlass
             }
         }
 
-        if (intersectCylinder(ray, kCylinderCenter, kCylinderRadius, kCylinderHeight, t, norm)) {
-            if (t >= tMin && t < hit.distance) {
+        if (intersectCylinder(ray, kCylinderCenter, kCylinderRadius, kCylinderHeight, tMin, t, norm)) {
+            if (t < hit.distance) {
                 hit.hit = true;
                 hit.distance = t;
                 hit.position = ray.origin + ray.direction * t;
@@ -231,8 +231,8 @@ HitRecord intersectSceneInterval(Ray ray, float tMin, float tMax, bool testGlass
             }
         }
 
-        if (intersectTriangularPrism(ray, kPrismCenter, kPrismSide, kPrismHeight, t, norm)) {
-            if (t >= tMin && t < hit.distance) {
+        if (intersectTriangularPrism(ray, kPrismCenter, kPrismSide, kPrismHeight, tMin, t, norm)) {
+            if (t < hit.distance) {
                 hit.hit = true;
                 hit.distance = t;
                 hit.position = ray.origin + ray.direction * t;
@@ -249,8 +249,8 @@ HitRecord intersectSceneInterval(Ray ray, float tMin, float tMax, bool testGlass
 
         vec3 slabMin = vec3( 1.00, 0.0, 0.35);
         vec3 slabMax = vec3( 1.70, 0.06, 1.05);
-        if (intersectBox(ray, slabMin, slabMax, t, norm)) {
-            if (t >= tMin && t < hit.distance) {
+        if (intersectBox(ray, slabMin, slabMax, tMin, t, norm)) {
+            if (t < hit.distance) {
                 hit.hit = true;
                 hit.distance = t;
                 hit.position = ray.origin + ray.direction * t;

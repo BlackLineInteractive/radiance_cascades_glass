@@ -178,7 +178,7 @@ vec3 getSkyRadiance(vec3 direction, vec3 sunDir) {
     return sky + sunGlowColor * sunDisc;
 }
 
-bool intersectBox(Ray ray, vec3 bmin, vec3 bmax, out float tHit, out vec3 hitNormal) {
+bool intersectBox(Ray ray, vec3 bmin, vec3 bmax, float tMin, out float tHit, out vec3 hitNormal) {
     vec3 invD = 1.0 / (ray.direction + vec3(1e-12));
     vec3 t0 = (bmin - ray.origin) * invD;
     vec3 t1 = (bmax - ray.origin) * invD;
@@ -189,13 +189,13 @@ bool intersectBox(Ray ray, vec3 bmin, vec3 bmax, out float tHit, out vec3 hitNor
     float enter = max(max(tmin.x, tmin.y), tmin.z);
     float exit  = min(min(tmax.x, tmax.y), tmax.z);
 
-    if (enter > exit || exit < 0.001) {
+    if (enter > exit || exit < tMin) {
         tHit = 0.0;
         hitNormal = vec3(0.0);
         return false;
     }
 
-    float t = enter > 0.001 ? enter : exit;
+    float t = enter > tMin ? enter : exit;
     tHit = t;
 
     vec3 p = ray.origin + ray.direction * t;
@@ -228,7 +228,7 @@ bool intersectBoxFast(Ray ray, vec3 bmin, vec3 bmax, out float tNear) {
     return (enter <= exit && exit > 0.001);
 }
 
-bool intersectSphere(Ray ray, vec3 center, float radius, out float tHit, out vec3 hitNormal) {
+bool intersectSphere(Ray ray, vec3 center, float radius, float tMin, out float tHit, out vec3 hitNormal) {
     vec3 oc = ray.origin - center;
     float b = dot(oc, ray.direction);
     float c = dot(oc, oc) - radius * radius;
@@ -240,25 +240,20 @@ bool intersectSphere(Ray ray, vec3 center, float radius, out float tHit, out vec
     }
 
     float sqrtDisc = sqrt(disc);
-    float t0 = -b - sqrtDisc;
-    float t1 = -b + sqrtDisc;
+    float t = -b - sqrtDisc;
+    if (t < tMin) t = -b + sqrtDisc;
+    if (t < tMin) {
+        tHit = 0.0;
+        hitNormal = vec3(0.0);
+        return false;
+    }
 
-    if (t0 > 0.001) {
-        tHit = t0;
-        hitNormal = normalize((ray.origin + ray.direction * t0) - center);
-        return true;
-    }
-    if (t1 > 0.001) {
-        tHit = t1;
-        hitNormal = normalize((ray.origin + ray.direction * t1) - center);
-        return true;
-    }
-    tHit = 0.0;
-    hitNormal = vec3(0.0);
-    return false;
+    tHit = t;
+    hitNormal = normalize((ray.origin + ray.direction * t) - center);
+    return true;
 }
 
-bool intersectCylinder(Ray ray, vec3 base, float radius, float height, out float tHit, out vec3 hitNormal) {
+bool intersectCylinder(Ray ray, vec3 base, float radius, float height, float tMin, out float tHit, out vec3 hitNormal) {
     vec3 d = ray.direction;
     vec3 o = ray.origin - base;
 
@@ -277,7 +272,7 @@ bool intersectCylinder(Ray ray, vec3 base, float radius, float height, out float
             float t0 = (-b - sqrtD) / (2.0 * a);
             float t1 = (-b + sqrtD) / (2.0 * a);
 
-            if (t0 > 0.001) {
+            if (t0 > tMin) {
                 float y = o.y + d.y * t0;
                 if (y >= 0.0 && y <= height) {
                     tClosest = t0;
@@ -285,7 +280,7 @@ bool intersectCylinder(Ray ray, vec3 base, float radius, float height, out float
                     found = true;
                 }
             }
-            if (!found && t1 > 0.001) {
+            if (!found && t1 > tMin) {
                 float y = o.y + d.y * t1;
                 if (y >= 0.0 && y <= height) {
                     tClosest = t1;
@@ -298,7 +293,7 @@ bool intersectCylinder(Ray ray, vec3 base, float radius, float height, out float
 
     if (abs(d.y) > 1e-6) {
         float tCap = (height - o.y) / d.y;
-        if (tCap > 0.001 && tCap < tClosest) {
+        if (tCap > tMin && tCap < tClosest) {
             float x = o.x + d.x * tCap;
             float z = o.z + d.z * tCap;
             if (x * x + z * z <= radius * radius) {
@@ -308,7 +303,7 @@ bool intersectCylinder(Ray ray, vec3 base, float radius, float height, out float
             }
         }
         float tBase = -o.y / d.y;
-        if (tBase > 0.001 && tBase < tClosest) {
+        if (tBase > tMin && tBase < tClosest) {
             float x = o.x + d.x * tBase;
             float z = o.z + d.z * tBase;
             if (x * x + z * z <= radius * radius) {
@@ -329,7 +324,7 @@ bool intersectCylinder(Ray ray, vec3 base, float radius, float height, out float
     return false;
 }
 
-bool intersectTriangularPrism(Ray ray, vec3 baseCenter, float side, float height, out float tHit, out vec3 hitNormal) {
+bool intersectTriangularPrism(Ray ray, vec3 baseCenter, float side, float height, float tMin, out float tHit, out vec3 hitNormal) {
     float h = side * 0.8660254;
     vec3 p0 = baseCenter + vec3(0.0, 0.0, 2.0 * h / 3.0);
     vec3 p1 = baseCenter + vec3(-side * 0.5, 0.0, -h / 3.0);
@@ -351,7 +346,7 @@ bool intersectTriangularPrism(Ray ray, vec3 baseCenter, float side, float height
         float denom = dot(ray.direction, sideNorm);
         if (abs(denom) > 1e-6) {
             float t = dot(a - ray.origin, sideNorm) / denom;
-            if (t > 0.001 && t < tClosest) {
+            if (t > tMin && t < tClosest) {
                 vec3 p = ray.origin + ray.direction * t;
                 if (p.y >= baseCenter.y && p.y <= baseCenter.y + height) {
                     vec3 ap = p - a;
@@ -369,7 +364,7 @@ bool intersectTriangularPrism(Ray ray, vec3 baseCenter, float side, float height
 
     if (abs(ray.direction.y) > 1e-6) {
         float tTop = (baseCenter.y + height - ray.origin.y) / ray.direction.y;
-        if (tTop > 0.001 && tTop < tClosest) {
+        if (tTop > tMin && tTop < tClosest) {
             vec3 p = ray.origin + ray.direction * tTop;
             vec2 v0 = p2.xz - p0.xz;
             vec2 v1 = p1.xz - p0.xz;
@@ -389,7 +384,7 @@ bool intersectTriangularPrism(Ray ray, vec3 baseCenter, float side, float height
             }
         }
         float tBot = (baseCenter.y - ray.origin.y) / ray.direction.y;
-        if (tBot > 0.001 && tBot < tClosest) {
+        if (tBot > tMin && tBot < tClosest) {
             vec3 p = ray.origin + ray.direction * tBot;
             vec2 v0 = p2.xz - p0.xz;
             vec2 v1 = p1.xz - p0.xz;

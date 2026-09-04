@@ -1,6 +1,6 @@
 # Radiance Cascades Glass & Caustics
 
-A real-time ray tracer for glass: refraction with dispersion, forward-splatted floor caustics, and a cascaded irradiance cache for the indirect bounce. Three separate backends — Apple Metal, Vulkan 1.2+, and OpenGL 4.3+ Core — share the scene definition and the mesh loader.
+A real-time ray tracer for glass: refraction with dispersion, forward-splatted floor caustics, and a cascaded irradiance cache for the indirect bounce. Three separate backends - Apple Metal, Vulkan 1.2+, and OpenGL 4.3+ Core - share the scene definition and the mesh loader.
 
 ![Realistic Glass Cascade GI](media/1_Realistic_Glass_Cascade_GI.png)
 
@@ -26,7 +26,7 @@ The **Radiance Cascades** algorithm was conceived and pioneered by **Alexander S
 - Repository: [https://github.com/Raikiri/RadianceCascadesPaper](https://github.com/Raikiri/RadianceCascadesPaper)
 - Direct PDF: [RadianceCascades.pdf](https://github.com/Raikiri/RadianceCascadesPaper/blob/main/out_latexmk2/RadianceCascades.pdf)
 
-What this project borrows from that work is the interval partition and the far-to-near merge. It is not a faithful implementation — see [What is and isn't Radiance Cascades here](#what-is-and-isnt-radiance-cascades-here) for where it departs.
+What this project borrows from that work is the interval partition and the far-to-near merge. It is not a faithful implementation - see [What is and isn't Radiance Cascades here](#what-is-and-isnt-radiance-cascades-here) for where it departs.
 
 ---
 
@@ -47,11 +47,11 @@ Glass is awkward for a real-time path tracer: refraction through two interfaces 
 
 The frame is five compute passes:
 
-1. **Cascaded irradiance** — a 64x64 probe grid per room surface (five surfaces packed into one 320x64 atlas) gathers indirect light over four non-overlapping distance intervals, merged far-to-near. Result is diffuse irradiance only; specular refraction is handled separately in the shading pass.
-2. **Atlas filter** — 7x7 Gaussian over each surface, so probe noise does not show up as blotches on the walls.
-3. **Caustic splatting** — one photon per thread, refracted through a glass object and projected onto the floor. Because photons land wherever they land, the accumulation buffer is integer and the splat is a bilinear `atomic_fetch_add` into fixed point.
-4. **Caustic filter** — reads the integer buffer back into a float texture, with an extra roughness-driven blur in frosted mode.
-5. **Shading** — one primary ray per pixel. Glass gets a Fresnel-weighted split between one reflection ray and one refraction ray traced per channel (R/G/B use different IOR, which is what produces the coloured fringes).
+1. **Cascaded irradiance** - a 64x64 probe grid per room surface (five surfaces packed into one 320x64 atlas) gathers indirect light over four non-overlapping distance intervals, merged far-to-near. Result is diffuse irradiance only; specular refraction is handled separately in the shading pass.
+2. **Atlas filter** - 7x7 Gaussian over each surface, so probe noise does not show up as blotches on the walls.
+3. **Caustic splatting** - one photon per thread, refracted through a glass object and projected onto the floor. Because photons land wherever they land, the accumulation buffer is integer and the splat is a bilinear `atomic_fetch_add` into fixed point.
+4. **Caustic filter** - reads the integer buffer back into a float texture, with an extra roughness-driven blur in frosted mode.
+5. **Shading** - one primary ray per pixel. Glass gets a Fresnel-weighted split between one reflection ray and one refraction ray traced per channel (R/G/B use different IOR, which is what produces the coloured fringes).
 
 Dispersion uses a Cauchy-style split, $n(\lambda) = n_0 + B/\lambda^2$, collapsed to three fixed offsets rather than a real spectral sampling. Internal attenuation is Beer-Lambert, $I(d) = I_0 e^{-\alpha d}$. The teapot (6,320 triangles) sits in a 4,095-node linear BVH traversed with a 64-entry stack and near-child ordering; everything else in the scene is an analytic primitive.
 
@@ -84,7 +84,9 @@ Dispersion uses a Cauchy-style split, $n(\lambda) = n_0 + B/\lambda^2$, collapse
 
 ## Architecture & Backends
 
-The three backends are independent hosts over a shared scene definition and mesh loader:
+The three backends are independent hosts over a shared scene definition and mesh loader. They are not quite feature-identical: the Metal cascade gather traces glass and feeds the previous frame's atlas back in for a second bounce, while the GLSL one skips both and uses a flat ambient term. That is most of the gap in the numbers below, so treat the Vulkan figure as measuring a cheaper gather rather than a faster backend.
+
+
 
 ```
 radiance_cascades_glass/
@@ -124,7 +126,7 @@ radiance_cascades_glass/
 | **Memory Barriers** | Implicit / Metal Fences | Explicit `VkMemoryBarrier` | `glMemoryBarrier` |
 | **Shader Storage** | `device const T*` | SSBO (`std430`) | SSBO (`std430`) |
 | **Platform Target** | macOS (Native) | Cross-platform / MoltenVK | Linux / Windows / Mesa |
-| **Measured (1080p)** | 24 fps clear / 20 fps frosted, AMD Radeon Pro 5500M | not benchmarked | not benchmarked |
+| **Measured** | 24 fps clear / 20 fps frosted @1080p | 70 fps clear / 49 fps frosted @720p, via MoltenVK | not benchmarked (macOS caps GL at 4.1, no compute) |
 
 ---
 
@@ -208,7 +210,7 @@ cd OpenGL && ./build.sh && ./rc_glass_gl
 
 ## Headless Benchmarking & CLI Options
 
-Every backend takes `--headless`, which renders all four modes at 1920x1080 and writes PNGs to `output/`:
+Every backend takes `--headless`, which renders all four modes and writes PNGs to `output/` (Metal renders at 1080p, Vulkan and OpenGL at 720p):
 
 ```bash
 # Run 4-mode automated headless benchmark on Metal
@@ -275,7 +277,7 @@ There is no explicit $\cos\theta$ term because the directions are drawn cosine-w
 
 The interval partition and the far-to-near merge come straight from Sannikov's formulation. Three things do not, and calling the result "Radiance Cascades" without qualification would be overselling it:
 
-**Cascades are not stored, so nothing is amortised.** In the real scheme, a coarse cascade is computed once at low spatial resolution and then read by every fine probe under it — that is where the speedup comes from. Here the atlas is one thread per texel and each thread walks all four cascades itself. Texels in the same 8x8 block do share cascade 3's *probe position*, but they each re-trace its 128 rays with their own jitter, so the coarse level costs 64x what the structure is supposed to make it cost. In practice it behaves as supersampling, not as a cache.
+**Cascades are not stored, so nothing is amortised.** In the real scheme, a coarse cascade is computed once at low spatial resolution and then read by every fine probe under it - that is where the speedup comes from. Here the atlas is one thread per texel and each thread walks all four cascades itself. Texels in the same 8x8 block do share cascade 3's *probe position*, but they each re-trace its 128 rays with their own jitter, so the coarse level costs 64x what the structure is supposed to make it cost. In practice it behaves as supersampling, not as a cache.
 
 **The angular ratio is off by 2x per level.** Spatial resolution drops 4x in area per cascade while the ray count only doubles. Sannikov's penumbra condition wants angular resolution to grow as fast as spatial resolution shrinks; at 2x, the higher cascades are angularly under-resolved for the solid angle they cover.
 

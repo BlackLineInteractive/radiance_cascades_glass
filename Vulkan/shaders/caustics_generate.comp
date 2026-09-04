@@ -23,6 +23,7 @@ layout(std430, set = 0, binding = 3) buffer CausticBuffer {
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
+// Photon flux is accumulated in fixed point so the splat can be atomic.
 const float kFixedScale = 1000000000.0;
 
 void splatBilinear(float hitFloorX, float hitFloorZ, float flux, uint ch) {
@@ -93,7 +94,8 @@ void main() {
         float cosTheta1 = clamp(-dot(lightDir, N1), 0.0, 1.0);
         float rayWeight = (4.0 * kSphereRadius * kSphereRadius / float(1024 * 1024)) * uniforms.sunIntensity;
 
-        float disp = (uniforms.renderMode == 3u) ? (0.040 * 1.5) : 0.025;
+        // Matches the sphere's scene material (ior 1.62, dispersion 0.040).
+        float disp = (uniforms.renderMode == 3u) ? 0.060 : 0.040;
         vec3 iors = vec3(1.62 - disp, 1.62, 1.62 + disp);
 
         for (uint ch = 0u; ch < 3u; ch++) {
@@ -138,12 +140,13 @@ void main() {
 
     if (quadrant == 1u) {
         if (uniforms.numTeapotNodes == 0u) return;
-        float objRadius = 0.48;
+        // Covers the mesh's XZ diagonal (bounds are +-0.664 x +-0.413).
+        float objRadius = 0.78;
         float sx = (uv.x - 0.5) * (2.0 * objRadius);
         float sy = (uv.y - 0.5) * (2.0 * objRadius);
         if (sx * sx + sy * sy > objRadius * objRadius) return;
 
-        vec3 rayOrigin = vec3(0.0, 0.30, 0.0) + sx * uAxis + sy * vAxis - lightDir * 3.5;
+        vec3 rayOrigin = vec3(0.0, 0.325, 0.0) + sx * uAxis + sy * vAxis - lightDir * 3.5;
         Ray photonRay;
         photonRay.origin = rayOrigin;
         photonRay.direction = lightDir;
@@ -178,10 +181,10 @@ void main() {
         float cosTheta3 = clamp(dot(D1, N2), 0.0, 1.0);
         float T_exit = 1.0 - dielectricFresnel(cosTheta3, objIor, 1.0);
 
-        vec3 absorption = beerLambertAbsorption(vec3(0.05), internalDist);
+        vec3 absorption = beerLambertAbsorption(vec3(0.04), internalDist);
         vec3 baseFlux = rayWeight * T_entry * T_exit * absorption * uniforms.sunColor;
 
-        float disp = (uniforms.renderMode == 3u) ? (0.025 * 1.5) : 0.0;
+        float disp = (uniforms.renderMode == 3u) ? 0.0375 : 0.0;
         vec3 iors = vec3(objIor - disp, objIor, objIor + disp);
 
         for (uint ch = 0u; ch < 3u; ch++) {
@@ -219,7 +222,7 @@ void main() {
 
         float tEntry;
         vec3 nEntry;
-        if (!intersectCylinder(photonRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, tEntry, nEntry)) return;
+        if (!intersectCylinder(photonRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, 0.001, tEntry, nEntry)) return;
 
         vec3 P1 = photonRay.origin + photonRay.direction * tEntry;
         vec3 N1 = nEntry;
@@ -238,7 +241,7 @@ void main() {
 
         float tExit;
         vec3 nExit;
-        if (!intersectCylinder(insideRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, tExit, nExit)) return;
+        if (!intersectCylinder(insideRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, 0.001, tExit, nExit)) return;
         if (tExit < 0.002) return;
 
         float internalDist = tExit;
@@ -285,7 +288,7 @@ void main() {
 
         float tEntry;
         vec3 nEntry;
-        if (!intersectTriangularPrism(photonRay, kPrismCenter, kPrismSide, kPrismHeight, tEntry, nEntry)) return;
+        if (!intersectTriangularPrism(photonRay, kPrismCenter, kPrismSide, kPrismHeight, 0.001, tEntry, nEntry)) return;
 
         vec3 P1 = photonRay.origin + photonRay.direction * tEntry;
         vec3 N1 = nEntry;
@@ -309,7 +312,7 @@ void main() {
 
             float tExit;
             vec3 nExit;
-            if (!intersectTriangularPrism(insideRay, kPrismCenter, kPrismSide, kPrismHeight, tExit, nExit)) continue;
+            if (!intersectTriangularPrism(insideRay, kPrismCenter, kPrismSide, kPrismHeight, 0.001, tExit, nExit)) continue;
             if (tExit < 0.002) continue;
 
             vec3 P2 = insideRay.origin + insideRay.direction * tExit;

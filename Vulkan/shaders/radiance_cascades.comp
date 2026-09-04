@@ -21,10 +21,8 @@ layout(set = 0, binding = 4, rgba32f) uniform writeonly image2D irradianceAtlas;
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-// =========================================================================
-// 3D Radiance Cascades Implementation (Alexander Sannikov)
-// 4 Cascades with bounded geometric range intervals and hierarchical merging
-// =========================================================================
+// Cascade N covers [kCascadeRanges[N], kCascadeRanges[N+1]] along a ray. The
+// intervals do not overlap, so a full hemisphere gather is the sum of the four.
 const float kCascadeRanges[5] = float[5](0.005, 0.25, 0.80, 2.50, 100.0);
 
 const int kRaysC0 = 16;
@@ -48,7 +46,6 @@ vec3 evalSurfaceDirectLighting(HitRecord hit, vec3 sunDir, vec3 sunCol, float su
     return (sunIllum + ambient) * hit.albedo;
 }
 
-// Traces ray strictly within distance interval [tMin, tMax]
 vec4 traceCascadeInterval(vec3 origin, vec3 dir, float tMin, float tMax, vec3 sunDir, vec3 sunCol, float sunInt, uint numNodes) {
     Ray probeRay;
     probeRay.origin = origin;
@@ -56,15 +53,40 @@ vec4 traceCascadeInterval(vec3 origin, vec3 dir, float tMin, float tMax, vec3 su
     HitRecord hit = intersectSceneInterval(probeRay, tMin, tMax, false, numNodes);
     if (hit.hit) {
         vec3 hitRad = evalSurfaceDirectLighting(hit, sunDir, sunCol, sunInt, numNodes);
-        // Distance-based edge fade near interval boundary to prevent sharp step
+        // Fade near the far edge so the interval boundary is not a hard ring.
         float tNorm = clamp((hit.distance - tMin) / max(1e-4, tMax - tMin), 0.0, 1.0);
         float boundaryFade = smoothstep(0.85, 1.0, tNorm);
-        return vec4(hitRad, boundaryFade); // w is residual transmittance
+        return vec4(hitRad, boundaryFade);
     }
-    // No hit within interval: 100% transmittance to next cascade
     return vec4(0.0, 0.0, 0.0, 1.0);
 }
 
+// Cosine-weighted Fibonacci direction `index` out of `count`, in the probe's
+// tangent frame. Cascade N+1 uses 2*count, so index 2i and 2i+1 are the two
+// directions that merge back into index i one level down.
+vec3 cascadeDirection(Basis tbn, int index, int count, float jitter) {
+    float cosTheta = sqrt(max(0.0, 1.0 - (float(index) + 0.5) / float(count)));
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+    float phi = float(index) * 2.399963229728 + jitter;
+    return basisToWorld(tbn, vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+}
+
+// Probes of cascade N sit at the centre of every `stride`-texel block, so
+// higher cascades are shared by progressively larger patches of the atlas.
+void cascadeProbe(uint surfaceId, uint lx, uint ly, int stride, out vec3 origin, out Basis tbn) {
+    int bx = clamp(int(lx) / stride * stride, 0, int(kAtlasSurfaceWidth) - stride);
+    int by = clamp(int(ly) / stride * stride, 0, int(kAtlasSurfaceHeight) - stride);
+    vec2 uv = (vec2(bx, by) + float(stride) * 0.5 + 0.5) / float(kAtlasSurfaceWidth);
+
+    vec3 pos, nor;
+    getSurfaceGeometry(surfaceId, uv, pos, nor);
+    tbn = makeTBN(nor);
+    origin = pos + nor * 0.004;
+}
+
+// One invocation per atlas texel. The four cascades are evaluated as a
+// depth-first walk of the direction tree rather than four flat passes, which
+// keeps the whole merge in registers instead of spilling ~3 KB of arrays.
 void main() {
     uvec2 tid = gl_GlobalInvocationID.xy;
     if (tid.x >= kAtlasSurfaceWidth * kNumSurfaces || tid.y >= kAtlasSurfaceHeight) return;
@@ -74,117 +96,65 @@ void main() {
     uint ly = tid.y;
 
     vec3 sunDir = normalize(uniforms.sunDirection);
-    float jitter = fract(sin(dot(vec2(lx, ly) + vec2(float(surfaceId) * 37.0), vec2(12.9898, 78.233))) * 43758.5453) * (2.0 * kPi);
-    const float kSurfaceRes = float(kAtlasSurfaceWidth);
+    float jitter = fract(sin(dot(vec2(lx, ly) + vec2(float(surfaceId) * 37.0),
+                                vec2(12.9898, 78.233))) * 43758.5453) * (2.0 * kPi);
 
-    // ---------------------------------------------------------------------
-    // 1. Cascade 3 (Far field: [2.50, 100.0] meters, 128 directions)
-    // Coarse spatial probe grid (stride 8 -> 8x8 probes per surface)
-    // ---------------------------------------------------------------------
-    int bx3 = clamp(int(lx) / 8 * 8, 0, int(kAtlasSurfaceWidth) - 8);
-    int by3 = clamp(int(ly) / 8 * 8, 0, int(kAtlasSurfaceHeight) - 8);
-    vec2 uvC3 = (vec2(bx3 + 4, by3 + 4) + 0.5) / kSurfaceRes;
-    vec3 probePosC3, probeNorC3;
-    getSurfaceGeometry(surfaceId, uvC3, probePosC3, probeNorC3);
-    Basis tbnC3 = makeTBN(probeNorC3);
-    vec3 rayOriginC3 = probePosC3 + probeNorC3 * 0.004;
+    vec3 originC0, originC1, originC2, originC3;
+    Basis tbnC0, tbnC1, tbnC2, tbnC3;
+    cascadeProbe(surfaceId, lx, ly, 1, originC0, tbnC0);
+    cascadeProbe(surfaceId, lx, ly, 2, originC1, tbnC1);
+    cascadeProbe(surfaceId, lx, ly, 4, originC2, tbnC2);
+    cascadeProbe(surfaceId, lx, ly, 8, originC3, tbnC3);
 
-    vec3 c3_rad[128];
-    for (int i = 0; i < kRaysC3; i++) {
-        float cosTheta = sqrt(max(0.0, 1.0 - (float(i) + 0.5) / float(kRaysC3)));
-        float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-        float phi = float(i) * 2.399963229728 + jitter;
-        vec3 dir = basisToWorld(tbnC3, vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
-
-        vec4 res = traceCascadeInterval(rayOriginC3, dir, kCascadeRanges[3], kCascadeRanges[4],
-                                        sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes);
-        if (res.w > 0.0) {
-            c3_rad[i] = res.rgb + res.w * getSkyRadiance(dir, sunDir) * 1.5;
-        } else {
-            c3_rad[i] = res.rgb;
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // 2. Cascade 2 (Mid-to-far field: [0.80, 2.50] meters, 64 directions)
-    // Mid spatial probe grid (stride 4 -> 16x16 probes per surface)
-    // Hierarchically merges radiance from Cascade 3
-    // ---------------------------------------------------------------------
-    int bx2 = clamp(int(lx) / 4 * 4, 0, int(kAtlasSurfaceWidth) - 4);
-    int by2 = clamp(int(ly) / 4 * 4, 0, int(kAtlasSurfaceHeight) - 4);
-    vec2 uvC2 = (vec2(bx2 + 2, by2 + 2) + 0.5) / kSurfaceRes;
-    vec3 probePosC2, probeNorC2;
-    getSurfaceGeometry(surfaceId, uvC2, probePosC2, probeNorC2);
-    Basis tbnC2 = makeTBN(probeNorC2);
-    vec3 rayOriginC2 = probePosC2 + probeNorC2 * 0.004;
-
-    vec3 c2_rad[64];
-    for (int i = 0; i < kRaysC2; i++) {
-        float cosTheta = sqrt(max(0.0, 1.0 - (float(i) + 0.5) / float(kRaysC2)));
-        float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-        float phi = float(i) * 2.399963229728 + jitter;
-        vec3 dir = basisToWorld(tbnC2, vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
-
-        vec4 res = traceCascadeInterval(rayOriginC2, dir, kCascadeRanges[2], kCascadeRanges[3],
-                                        sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes);
-        vec3 incomingC3 = 0.5 * (c3_rad[2 * i] + c3_rad[2 * i + 1]);
-        c2_rad[i] = res.rgb + res.w * incomingC3;
-    }
-
-    // ---------------------------------------------------------------------
-    // 3. Cascade 1 (Near-to-mid field: [0.25, 0.80] meters, 32 directions)
-    // Fine-mid spatial probe grid (stride 2 -> 32x32 probes per surface)
-    // Hierarchically merges radiance from Cascade 2
-    // ---------------------------------------------------------------------
-    int bx1 = clamp(int(lx) / 2 * 2, 0, int(kAtlasSurfaceWidth) - 2);
-    int by1 = clamp(int(ly) / 2 * 2, 0, int(kAtlasSurfaceHeight) - 2);
-    vec2 uvC1 = (vec2(bx1 + 1, by1 + 1) + 0.5) / kSurfaceRes;
-    vec3 probePosC1, probeNorC1;
-    getSurfaceGeometry(surfaceId, uvC1, probePosC1, probeNorC1);
-    Basis tbnC1 = makeTBN(probeNorC1);
-    vec3 rayOriginC1 = probePosC1 + probeNorC1 * 0.004;
-
-    vec3 c1_rad[32];
-    for (int i = 0; i < kRaysC1; i++) {
-        float cosTheta = sqrt(max(0.0, 1.0 - (float(i) + 0.5) / float(kRaysC1)));
-        float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-        float phi = float(i) * 2.399963229728 + jitter;
-        vec3 dir = basisToWorld(tbnC1, vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
-
-        vec4 res = traceCascadeInterval(rayOriginC1, dir, kCascadeRanges[1], kCascadeRanges[2],
-                                        sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes);
-        vec3 incomingC2 = 0.5 * (c2_rad[2 * i] + c2_rad[2 * i + 1]);
-        c1_rad[i] = res.rgb + res.w * incomingC2;
-    }
-
-    // ---------------------------------------------------------------------
-    // 4. Cascade 0 (Contact field: [0.005, 0.25] meters, 16 directions)
-    // Full resolution probe grid (stride 1 -> 64x64 probes per surface)
-    // Hierarchically merges radiance from Cascade 1 & integrates irradiance
-    // ---------------------------------------------------------------------
-    vec2 uvC0 = (vec2(lx, ly) + 0.5) / kSurfaceRes;
-    vec3 probePosC0, probeNorC0;
-    getSurfaceGeometry(surfaceId, uvC0, probePosC0, probeNorC0);
-    Basis tbnC0 = makeTBN(probeNorC0);
-    vec3 rayOriginC0 = probePosC0 + probeNorC0 * 0.004;
-
-    vec3 c0_rad[16];
     vec3 accumIrradiance = vec3(0.0);
 
-    for (int i = 0; i < kRaysC0; i++) {
-        float cosTheta = sqrt(max(0.0, 1.0 - (float(i) + 0.5) / float(kRaysC0)));
-        float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-        float phi = float(i) * 2.399963229728 + jitter;
-        vec3 dir = basisToWorld(tbnC0, vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+    for (int i0 = 0; i0 < kRaysC0; i0++) {
+        vec3 dir0 = cascadeDirection(tbnC0, i0, kRaysC0, jitter);
+        vec4 seg0 = traceCascadeInterval(originC0, dir0, kCascadeRanges[0], kCascadeRanges[1],
+                                         sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes);
+        if (seg0.w <= 0.0) {
+            accumIrradiance += seg0.rgb;
+            continue;
+        }
 
-        vec4 res = traceCascadeInterval(rayOriginC0, dir, kCascadeRanges[0], kCascadeRanges[1],
-                                        sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes);
-        vec3 incomingC1 = 0.5 * (c1_rad[2 * i] + c1_rad[2 * i + 1]);
-        c0_rad[i] = res.rgb + res.w * incomingC1;
+        vec3 fromC1 = vec3(0.0);
+        for (int a = 0; a < 2; a++) {
+            int i1 = 2 * i0 + a;
+            vec3 dir1 = cascadeDirection(tbnC1, i1, kRaysC1, jitter);
+            vec4 seg1 = traceCascadeInterval(originC1, dir1, kCascadeRanges[1], kCascadeRanges[2],
+                                             sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes);
+            if (seg1.w <= 0.0) {
+                fromC1 += 0.5 * seg1.rgb;
+                continue;
+            }
 
-        accumIrradiance += c0_rad[i];
+            vec3 fromC2 = vec3(0.0);
+            for (int b = 0; b < 2; b++) {
+                int i2 = 2 * i1 + b;
+                vec3 dir2 = cascadeDirection(tbnC2, i2, kRaysC2, jitter);
+                vec4 seg2 = traceCascadeInterval(originC2, dir2, kCascadeRanges[2], kCascadeRanges[3],
+                                                 sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes);
+                if (seg2.w <= 0.0) {
+                    fromC2 += 0.5 * seg2.rgb;
+                    continue;
+                }
+
+                vec3 fromC3 = vec3(0.0);
+                for (int c = 0; c < 2; c++) {
+                    int i3 = 2 * i2 + c;
+                    vec3 dir3 = cascadeDirection(tbnC3, i3, kRaysC3, jitter);
+                    vec4 seg3 = traceCascadeInterval(originC3, dir3, kCascadeRanges[3], kCascadeRanges[4],
+                                                     sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes);
+                    // Nothing left to merge past the last cascade, so the
+                    // residual transmittance picks up the sky.
+                    fromC3 += 0.5 * (seg3.rgb + seg3.w * getSkyRadiance(dir3, sunDir) * 1.5);
+                }
+                fromC2 += 0.5 * (seg2.rgb + seg2.w * fromC3);
+            }
+            fromC1 += 0.5 * (seg1.rgb + seg1.w * fromC2);
+        }
+        accumIrradiance += seg0.rgb + seg0.w * fromC1;
     }
 
-    vec3 finalIrradiance = accumIrradiance / float(kRaysC0);
-    imageStore(irradianceAtlas, ivec2(tid), vec4(finalIrradiance, 1.0));
+    imageStore(irradianceAtlas, ivec2(tid), vec4(accumIrradiance / float(kRaysC0), 1.0));
 }
