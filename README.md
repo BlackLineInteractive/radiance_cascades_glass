@@ -59,12 +59,12 @@ This engine unifies:
 
 | Mode 1: Clear Glass & Floor Caustics | Mode 2: Frosted / Rough Glass |
 |:---:|:---:|
-| ![Realistic](media/1_Realistic_Glass_Cascade_GI.png) | ![Frosted](media/3_Frosted_glass.png) |
+| ![Realistic](media/1_Realistic_Glass_Cascade_GI.png) | ![Frosted](media/2_Frosted_Glass.png) |
 | *Snell refraction, Cauchy dispersion, floor photon caustics* | *Cone-jittered transmission & diffused caustic filter* |
 
 | Mode 3: Newton Prism Dispersion | Mode 0: Whitted RT Baseline |
 |:---:|:---:|
-| ![Dispersion](media/2.png) | ![Whitted Baseline](media/4_Whitted_Baseline.png) |
+| ![Dispersion](media/3_Spectral_Dispersion.png) | ![Whitted Baseline](media/4_Whitted_Baseline.png) |
 | *Amplified spectral separation on prism & crystal sphere* | *Classical binary shadow ray (zero caustics, dark shadow)* |
 
 ---
