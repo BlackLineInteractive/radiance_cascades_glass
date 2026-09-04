@@ -19,3 +19,7 @@ rc_glass_gl
 # Shaders (generated binaries)
 Metal/shaders/*.metallib
 Vulkan/shaders/*.spv
+
+# Benchmark & screenshot outputs
+output/
+Metal/output/

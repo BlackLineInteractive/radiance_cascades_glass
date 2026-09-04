@@ -267,29 +267,42 @@ void main() {
                         vec3 uVec = normalize(cross(wT, upVec));
                         vec3 vVec = cross(wT, uVec);
 
-                        const vec2 discOffsets[9] = {
-                            vec2(0.0, 0.0),
-                            vec2(0.7, 0.0), vec2(-0.7, 0.0),
-                            vec2(0.0, 0.7), vec2(0.0, -0.7),
-                            vec2(0.5, 0.5), vec2(-0.5, 0.5),
-                            vec2(0.5, -0.5), vec2(-0.5, -0.5)
-                        };
-                        const float weights[9] = {
-                            0.28, 0.09, 0.09, 0.09, 0.09, 0.09, 0.09, 0.09, 0.09
-                        };
+                        // High-frequency per-pixel rotation using Interleaved Gradient Noise (IGN)
+                        vec3 ignMagic = vec3(0.06711056, 0.00583715, 52.9829189);
+                        float ign = fract(ignMagic.z * fract(dot(vec2(tid), ignMagic.xy)));
+                        float phi = ign * 6.283185307;
+                        float cosPhi = cos(phi);
+                        float sinPhi = sin(phi);
 
+                        // 16-sample Vogel's disk (golden ratio spiral) with Gaussian radial weighting
+                        const int kSamples = 16;
                         vec3 accumRad = vec3(0.0);
-                        for (int s = 0; s < 9; s++) {
-                            vec2 off = discOffsets[s] * coneAngle;
+                        float weightSum = 0.0;
+
+                        for (int s = 0; s < kSamples; s++) {
+                            float theta = float(s) * 2.39996323;
+                            float r = sqrt((float(s) + 0.5) / float(kSamples));
+
+                            // Rotated disc offset
+                            float unrotX = r * cos(theta);
+                            float unrotY = r * sin(theta);
+                            float rotX = unrotX * cosPhi - unrotY * sinPhi;
+                            float rotY = unrotX * sinPhi + unrotY * cosPhi;
+
+                            vec2 off = vec2(rotX, rotY) * coneAngle;
                             vec3 sampleDir = normalize(wT + off.x * uVec + off.y * vVec);
+
+                            // Smooth Gaussian-like weight to prevent harsh disc edges
+                            float weight = exp(-1.2 * r * r);
 
                             Ray coneRay;
                             coneRay.origin = P2 + sampleDir * 0.005;
                             coneRay.direction = sampleDir;
                             HitRecord coneHit = intersectScene(coneRay, false, 0u);
-                            accumRad += weights[s] * evaluateSurfaceRadiance(coneHit, coneRay, true);
+                            accumRad += weight * evaluateSurfaceRadiance(coneHit, coneRay, true);
+                            weightSum += weight;
                         }
-                        refrColor = accumRad * absorption;
+                        refrColor = (accumRad / weightSum) * absorption;
                     } else {
                         vec3 dirR = exitOkR ? T2_R : reflect(okR ? T_R : T_G, nExit);
                         Ray exitRayR;
