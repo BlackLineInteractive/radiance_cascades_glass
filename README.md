@@ -16,8 +16,8 @@ A high-performance, multi-backend real-time ray tracing engine demonstrating **R
 
 ## Attribution & Credits
 
-The **Radiance Cascades** algorithm was conceived and pioneered by **Alexander Sannikov**, who introduced the revolutionary concept in his 2023/2024 research:
-- **Alexander Sannikov** – *“Radiance Cascades: A Novel Approach to Calculating Global Illumination”* (2023/2024).
+The **Radiance Cascades** algorithm was conceived and pioneered by **Alexander Sannikov**, who introduced the concept in his 2023/2024 research:
+- **Alexander Sannikov** - *"Radiance Cascades: A Novel Approach to Calculating Global Illumination"* (2023/2024).
 - Repository: [https://github.com/Raikiri/RadianceCascadesPaper](https://github.com/Raikiri/RadianceCascadesPaper)
 - Direct PDF: [RadianceCascades.pdf](https://github.com/Raikiri/RadianceCascadesPaper/blob/main/out_latexmk2/RadianceCascades.pdf)
 
@@ -38,16 +38,16 @@ Created and maintained by **Blackline Interactive**:
 
 ## Technical Overview
 
-Traditional real-time ray tracing struggles with complex dielectric phenomena—such as multi-interface refraction, chromatic dispersion, rough transmission (frosted glass), and focused photon caustics—due to high sampling noise and prohibitive computational cost.
+Traditional real-time ray tracing struggles with complex dielectric phenomena (such as multi-interface refraction, chromatic dispersion, rough transmission for frosted glass, and focused photon caustics) due to high sampling noise and prohibitive computational cost.
 
 This engine unifies:
-1. **Radiance Cascades Global Illumination**: Hierarchical angular-spatial radiance representation across surfaces for smooth indirect bounce lighting and color bleeding.
+1. **3D Radiance Cascades Global Illumination**: Hierarchical 4-cascade angular-spatial radiance representation with bounded distance intervals and far-to-near merging across surfaces for smooth indirect bounce lighting and color bleeding.
 2. **Multi-Wavelength Cauchy Dispersion**: Spectral splitting ($R, G, B$) through Newton's prism and crystal spheres using Cauchy's dispersion equation:
    $$n(\lambda) = n_0 + \frac{B}{\lambda^2}$$
 3. **Atomic Caustic Splatting**: Parallel forward photon projection from directional sun rays, refracted through complex glass geometries and accumulated into a 32-bit fixed-point spatial irradiance grid using 32-bit GPU atomics (`atomicAdd`).
 4. **Beer-Lambert Absorption**: Physically accurate volume attenuation along internal ray paths:
    $$I(d) = I_0 \exp(-\alpha d)$$
-5. **GPU Linear BVH Traversal**: Stackless bounding volume hierarchy traversal intersecting the 6,320-triangle Utah Teapot alongside analytical geometric primitives (spheres, cylinders, prisms, slabs).
+5. **GPU Linear BVH Traversal**: Fixed-depth (64-entry stack) linear bounding volume hierarchy traversal with near-child sorting heuristic intersecting the 6,320-triangle Utah Teapot alongside analytical geometric primitives (spheres, cylinders, prisms, slabs).
 
 ---
 
@@ -237,9 +237,23 @@ $$w_{00} = (1 - f_x)(1 - f_z), \quad w_{10} = f_x (1 - f_z), \quad w_{01} = (1 -
 Accumulated into integer SSBO buffers via fixed-point scaling factor $S = 10^9$:
 $$\Delta I = \lfloor \Phi \cdot w_{uv} \cdot S \rfloor$$
 
+### 4. 3D Radiance Cascades Formulation
+Following Alexander Sannikov's Radiance Cascades framework, indirect radiance is evaluated across a 4-level hierarchy ($C = 4$) with bounded geometric range intervals:
+
+$$I_c = [r_c, r_{c+1}], \quad \mathbf{r} = \{0.005\,\text{m},\, 0.25\,\text{m},\, 0.80\,\text{m},\, 2.50\,\text{m},\, 100.0\,\text{m}\}$$
+
+Each cascade balances spatial probe density and angular ray resolution ($M_c \in \{16, 32, 64, 128\}$):
+- **Interval-Bounded Ray Tracing**: Rays for cascade $c$ are traced exclusively within distance interval $[r_c, r_{c+1}]$, drastically pruning BVH traversal and primitive intersections.
+- **Hierarchical Far-to-Near Merging**: Radiance is merged backwards from Cascade 3 down to Cascade 0:
+  $$L_c(\vec{\omega}) = L_c^{\text{local}}(\vec{\omega}) + \tau_c(\vec{\omega}) \cdot L_{c+1}^{\text{merged}}(\vec{\omega})$$
+  where $\tau_c(\vec{\omega}) = 0.0$ if occluded by geometry in interval $[r_c, r_{c+1}]$, and $\tau_c(\vec{\omega}) = 1.0$ (or boundary-faded) if unoccluded.
+- **Cosine-Weighted Irradiance Integration**: The fully merged Cascade 0 radiance field integrates into surface irradiance:
+  $$E(\mathbf{x}) = \frac{1}{\pi} \sum_{k=0}^{M_0 - 1} L_0(\vec{\omega}_k) \cos\theta_k \Delta\Omega_k$$
+
 ---
 
 ## License
 
 This project is open-source software licensed under the **[MIT License](LICENSE)**. See the [LICENSE](LICENSE) file for details.
 Copyright (c) 2026 Blackline Interactive.
+

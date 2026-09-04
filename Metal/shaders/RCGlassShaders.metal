@@ -380,21 +380,25 @@ inline bool intersectTriangle(
     return true;
 }
 
-inline bool intersectTeapotBVH(
+// Linear GPU BVH traversal using a fixed 64-depth stack with near-child sorting and interval bounds [tMin, tMax]
+inline bool intersectTeapotBVHInterval(
     Ray ray,
     device const GPUBVHNode *nodes,
     device const GPUTriangle *triangles,
     uint numNodes,
+    float tMin,
+    float tMax,
     thread float &tHit,
     thread float3 &hitNormal
 ) {
     if (numNodes == 0) return false;
 
+    // Linear BVH traversal using a fixed 64-depth stack
     int stack[64];
     int stackPtr = 0;
     stack[stackPtr++] = 0;
 
-    float tClosest = 1e30f;
+    float tClosest = tMax;
     float3 bestNormal = float3(0.0f);
     bool hitAny = false;
 
@@ -415,7 +419,7 @@ inline bool intersectTeapotBVH(
                 float3 nTri;
                 if (intersectTriangle(ray, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz,
                                       tri.n0.xyz, tri.n1.xyz, tri.n2.xyz, tTri, nTri)) {
-                    if (tTri < tClosest) {
+                    if (tTri >= tMin && tTri < tClosest) {
                         tClosest = tTri;
                         bestNormal = nTri;
                         hitAny = true;
@@ -451,16 +455,29 @@ inline bool intersectTeapotBVH(
     return false;
 }
 
-inline HitRecord intersectScene(
+inline bool intersectTeapotBVH(
+    Ray ray,
+    device const GPUBVHNode *nodes,
+    device const GPUTriangle *triangles,
+    uint numNodes,
+    thread float &tHit,
+    thread float3 &hitNormal
+) {
+    return intersectTeapotBVHInterval(ray, nodes, triangles, numNodes, 0.001f, 1e30f, tHit, hitNormal);
+}
+
+inline HitRecord intersectSceneInterval(
     Ray ray,
     bool testGlass,
     device const GPUBVHNode *bvhNodes,
     device const GPUTriangle *triangles,
-    uint numNodes
+    uint numNodes,
+    float tMin,
+    float tMax
 ) {
     HitRecord hit;
     hit.hit = false;
-    hit.distance = 1e30f;
+    hit.distance = tMax;
     hit.isGlass = false;
     hit.roughness = 0.0f;
     hit.objectId = 0;
@@ -471,7 +488,7 @@ inline HitRecord intersectScene(
     // Room boundaries
     if (abs(ray.direction.z) > 1e-5f) {
         t = (kRoomMaxZ - ray.origin.z) / ray.direction.z;
-        if (t > 0.001f && t < hit.distance) {
+        if (t >= tMin && t < hit.distance) {
             float3 p = ray.origin + ray.direction * t;
             if (p.x >= kRoomMinX && p.x <= kRoomMaxX && p.y >= kRoomMinY && p.y <= kRoomMaxY) {
                 hit.hit = true;
@@ -488,7 +505,7 @@ inline HitRecord intersectScene(
 
     if (abs(ray.direction.y) > 1e-5f) {
         t = -ray.origin.y / ray.direction.y;
-        if (t > 0.001f && t < hit.distance) {
+        if (t >= tMin && t < hit.distance) {
             float3 p = ray.origin + ray.direction * t;
             if (p.x >= kRoomMinX && p.x <= kRoomMaxX && p.z >= kRoomMinZ && p.z <= kRoomMaxZ) {
                 hit.hit = true;
@@ -506,7 +523,7 @@ inline HitRecord intersectScene(
         }
 
         t = (kRoomMaxY - ray.origin.y) / ray.direction.y;
-        if (t > 0.001f && t < hit.distance) {
+        if (t >= tMin && t < hit.distance) {
             float3 p = ray.origin + ray.direction * t;
             if (p.x >= kRoomMinX && p.x <= kRoomMaxX && p.z >= kRoomMinZ && p.z <= kRoomMaxZ) {
                 hit.hit = true;
@@ -523,7 +540,7 @@ inline HitRecord intersectScene(
 
     if (abs(ray.direction.x) > 1e-5f) {
         t = (kRoomMinX - ray.origin.x) / ray.direction.x;
-        if (t > 0.001f && t < hit.distance) {
+        if (t >= tMin && t < hit.distance) {
             float3 p = ray.origin + ray.direction * t;
             if (p.y >= kRoomMinY && p.y <= kRoomMaxY && p.z >= kRoomMinZ && p.z <= kRoomMaxZ) {
                 if (p.y >= kWinMinY && p.y <= kWinMaxY && p.z >= kWinMinZ && p.z <= kWinMaxZ) {
@@ -559,7 +576,7 @@ inline HitRecord intersectScene(
         }
 
         t = (kRoomMaxX - ray.origin.x) / ray.direction.x;
-        if (t > 0.001f && t < hit.distance) {
+        if (t >= tMin && t < hit.distance) {
             float3 p = ray.origin + ray.direction * t;
             if (p.y >= kRoomMinY && p.y <= kRoomMaxY && p.z >= kRoomMinZ && p.z <= kRoomMaxZ) {
                 hit.hit = true;
@@ -575,24 +592,22 @@ inline HitRecord intersectScene(
     }
 
     if (testGlass) {
-        if (intersectTeapotBVH(ray, bvhNodes, triangles, numNodes, t, norm)) {
-            if (t < hit.distance) {
-                hit.hit = true;
-                hit.distance = t;
-                hit.position = ray.origin + ray.direction * t;
-                hit.normal = norm;
-                hit.albedo = float3(1.0f);
-                hit.roughness = 0.0f;
-                hit.isGlass = true;
-                hit.objectId = 10;
-                hit.ior = 1.52f;
-                hit.dispersion = 0.025f;
-                hit.absorption = float3(0.04f, 0.04f, 0.04f);
-            }
+        if (intersectTeapotBVHInterval(ray, bvhNodes, triangles, numNodes, tMin, hit.distance, t, norm)) {
+            hit.hit = true;
+            hit.distance = t;
+            hit.position = ray.origin + ray.direction * t;
+            hit.normal = norm;
+            hit.albedo = float3(1.0f);
+            hit.roughness = 0.0f;
+            hit.isGlass = true;
+            hit.objectId = 10;
+            hit.ior = 1.52f;
+            hit.dispersion = 0.025f;
+            hit.absorption = float3(0.04f, 0.04f, 0.04f);
         }
 
         if (intersectSphere(ray, kSphereCenter, kSphereRadius, t, norm)) {
-            if (t < hit.distance) {
+            if (t >= tMin && t < hit.distance) {
                 hit.hit = true;
                 hit.distance = t;
                 hit.position = ray.origin + ray.direction * t;
@@ -608,7 +623,7 @@ inline HitRecord intersectScene(
         }
 
         if (intersectCylinder(ray, kCylinderCenter, kCylinderRadius, kCylinderHeight, t, norm)) {
-            if (t < hit.distance) {
+            if (t >= tMin && t < hit.distance) {
                 hit.hit = true;
                 hit.distance = t;
                 hit.position = ray.origin + ray.direction * t;
@@ -624,7 +639,7 @@ inline HitRecord intersectScene(
         }
 
         if (intersectTriangularPrism(ray, kPrismCenter, kPrismSide, kPrismHeight, t, norm)) {
-            if (t < hit.distance) {
+            if (t >= tMin && t < hit.distance) {
                 hit.hit = true;
                 hit.distance = t;
                 hit.position = ray.origin + ray.direction * t;
@@ -642,7 +657,7 @@ inline HitRecord intersectScene(
         float3 slabMin = float3( 1.00f, 0.0f, 0.35f);
         float3 slabMax = float3( 1.70f, 0.06f, 1.05f);
         if (intersectBox(ray, slabMin, slabMax, t, norm)) {
-            if (t < hit.distance) {
+            if (t >= tMin && t < hit.distance) {
                 hit.hit = true;
                 hit.distance = t;
                 hit.position = ray.origin + ray.direction * t;
@@ -659,6 +674,16 @@ inline HitRecord intersectScene(
     }
 
     return hit;
+}
+
+inline HitRecord intersectScene(
+    Ray ray,
+    bool testGlass,
+    device const GPUBVHNode *bvhNodes,
+    device const GPUTriangle *triangles,
+    uint numNodes
+) {
+    return intersectSceneInterval(ray, testGlass, bvhNodes, triangles, numNodes, 0.001f, 1e30f);
 }
 
 inline float3 getSkyRadiance(float3 direction, float3 sunDir) {
@@ -739,6 +764,67 @@ inline void getSurfaceGeometry(uint surfaceId, float2 uv, thread float3 &pos, th
     }
 }
 
+// =========================================================================
+// 3D Radiance Cascades Implementation (Alexander Sannikov)
+// 4 Cascades with bounded geometric range intervals and hierarchical merging
+// =========================================================================
+constant float kCascadeRanges[5] = { 0.005f, 0.25f, 0.80f, 2.50f, 100.0f };
+
+constant int kRaysC0 = 16;
+constant int kRaysC1 = 32;
+constant int kRaysC2 = 64;
+constant int kRaysC3 = 128;
+
+inline float3 evalSurfaceDirectLighting(
+    HitRecord hit,
+    float3 sunDir,
+    float3 sunCol,
+    float sunInt,
+    uint numNodes,
+    device const GPUBVHNode *bvhNodes,
+    device const GPUTriangle *triangles
+) {
+    float NdotL = max(0.0f, dot(hit.normal, sunDir));
+    float3 sunIllum = float3(0.0f);
+    if (NdotL > 0.0f) {
+        Ray sRay;
+        sRay.origin = hit.position + hit.normal * 0.002f;
+        sRay.direction = sunDir;
+        HitRecord sHit = intersectSceneInterval(sRay, false, bvhNodes, triangles, numNodes, 0.001f, 100.0f);
+        if (!sHit.hit) {
+            sunIllum = sunCol * (sunInt * NdotL);
+        }
+    }
+    float3 ambient = float3(0.08f);
+    return (sunIllum + ambient) * hit.albedo;
+}
+
+// Traces ray strictly within distance interval [tMin, tMax]
+inline float4 traceCascadeInterval(
+    float3 origin,
+    float3 dir,
+    float tMin,
+    float tMax,
+    float3 sunDir,
+    float3 sunCol,
+    float sunInt,
+    uint numNodes,
+    device const GPUBVHNode *bvhNodes,
+    device const GPUTriangle *triangles
+) {
+    Ray probeRay;
+    probeRay.origin = origin;
+    probeRay.direction = dir;
+    HitRecord hit = intersectSceneInterval(probeRay, false, bvhNodes, triangles, numNodes, tMin, tMax);
+    if (hit.hit) {
+        float3 hitRad = evalSurfaceDirectLighting(hit, sunDir, sunCol, sunInt, numNodes, bvhNodes, triangles);
+        float tNorm = clamp((hit.distance - tMin) / max(1e-4f, tMax - tMin), 0.0f, 1.0f);
+        float boundaryFade = smoothstep(0.85f, 1.0f, tNorm);
+        return float4(hitRad, boundaryFade); // w is residual transmittance
+    }
+    return float4(0.0f, 0.0f, 0.0f, 1.0f);
+}
+
 kernel void computeRadianceCascadesKernel(
     uint2 tid [[thread_position_in_grid]],
     texture2d<float, access::write> irradianceAtlas [[texture(0)]],
@@ -751,58 +837,122 @@ kernel void computeRadianceCascadesKernel(
     uint surfaceId = tid.x / kAtlasSurfaceWidth;
     uint lx = tid.x % kAtlasSurfaceWidth;
     uint ly = tid.y;
-    float2 uv = (float2(lx, ly) + 0.5f) / float2(kAtlasSurfaceWidth, kAtlasSurfaceHeight);
 
-    float3 probePos, probeNor;
-    getSurfaceGeometry(surfaceId, uv, probePos, probeNor);
-
-    Basis tbn = makeTBN(probeNor);
     float3 sunDir = normalize(uniforms.sunDirection);
-
     float jitter = fract(sin(dot(float2(lx, ly) + float2(surfaceId * 37.0f), float2(12.9898f, 78.233f))) * 43758.5453f) * (2.0f * kPi);
+    const float kSurfaceRes = float(kAtlasSurfaceWidth);
 
-    const int kRays = 128;
-    const float dOmega = (2.0f * kPi) / float(kRays);
+    // ---------------------------------------------------------------------
+    // 1. Cascade 3 (Far field: [2.50, 100.0] meters, 128 directions)
+    // Coarse spatial probe grid (stride 8 -> 8x8 probes per surface)
+    // ---------------------------------------------------------------------
+    int bx3 = clamp(int(lx) / 8 * 8, 0, int(kAtlasSurfaceWidth) - 8);
+    int by3 = clamp(int(ly) / 8 * 8, 0, int(kAtlasSurfaceHeight) - 8);
+    float2 uvC3 = (float2(bx3 + 4, by3 + 4) + 0.5f) / kSurfaceRes;
+    float3 probePosC3, probeNorC3;
+    getSurfaceGeometry(surfaceId, uvC3, probePosC3, probeNorC3);
+    Basis tbnC3 = makeTBN(probeNorC3);
+    float3 rayOriginC3 = probePosC3 + probeNorC3 * 0.004f;
 
-    float3 accumIrradiance = float3(0.0f);
-
-    for (int i = 0; i < kRays; i++) {
-        float cosTheta = sqrt(1.0f - (float(i) + 0.5f) / float(kRays));
+    float3 c3_rad[128];
+    for (int i = 0; i < kRaysC3; i++) {
+        float cosTheta = sqrt(max(0.0f, 1.0f - (float(i) + 0.5f) / float(kRaysC3)));
         float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
         float phi = float(i) * 2.399963229728f + jitter;
+        float3 dir = tbnC3.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
 
-        float3 localDir = float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
-        float3 rayDir = tbn.toWorld(localDir);
-
-        Ray probeRay;
-        probeRay.origin = probePos + probeNor * 0.004f;
-        probeRay.direction = rayDir;
-
-        HitRecord hit = intersectScene(probeRay, false, bvhNodes, triangles, 0);
-
-        float3 incidentRad = float3(0.0f);
-
-        if (!hit.hit) {
-            float hFactor = saturate(rayDir.y * 1.5f);
-            float3 sky = mix(float3(0.78f, 0.85f, 0.95f), float3(0.40f, 0.62f, 0.95f), hFactor);
-            incidentRad = sky * 1.5f;
+        float4 res = traceCascadeInterval(rayOriginC3, dir, kCascadeRanges[3], kCascadeRanges[4],
+                                          sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes,
+                                          bvhNodes, triangles);
+        if (res.w > 0.0f) {
+            c3_rad[i] = res.xyz + res.w * getSkyRadiance(dir, sunDir) * 1.5f;
         } else {
-            float NdotL = max(0.0f, dot(hit.normal, sunDir));
-            float3 sunIllum = float3(0.0f);
-            if (NdotL > 0.0f) {
-                Ray sRay;
-                sRay.origin = hit.position + hit.normal * 0.004f;
-                sRay.direction = sunDir;
-                HitRecord sHit = intersectScene(sRay, false, bvhNodes, triangles, 0);
-                if (!sHit.hit) {
-                    sunIllum = uniforms.sunColor * (uniforms.sunIntensity * NdotL);
-                }
-            }
-            float3 ambientBleed = float3(0.08f);
-            incidentRad = (sunIllum + ambientBleed) * hit.albedo;
+            c3_rad[i] = res.xyz;
         }
+    }
 
-        accumIrradiance += incidentRad * cosTheta * dOmega;
+    // ---------------------------------------------------------------------
+    // 2. Cascade 2 (Mid-to-far field: [0.80, 2.50] meters, 64 directions)
+    // Mid spatial probe grid (stride 4 -> 16x16 probes per surface)
+    // Hierarchically merges radiance from Cascade 3
+    // ---------------------------------------------------------------------
+    int bx2 = clamp(int(lx) / 4 * 4, 0, int(kAtlasSurfaceWidth) - 4);
+    int by2 = clamp(int(ly) / 4 * 4, 0, int(kAtlasSurfaceHeight) - 4);
+    float2 uvC2 = (float2(bx2 + 2, by2 + 2) + 0.5f) / kSurfaceRes;
+    float3 probePosC2, probeNorC2;
+    getSurfaceGeometry(surfaceId, uvC2, probePosC2, probeNorC2);
+    Basis tbnC2 = makeTBN(probeNorC2);
+    float3 rayOriginC2 = probePosC2 + probeNorC2 * 0.004f;
+
+    float3 c2_rad[64];
+    for (int i = 0; i < kRaysC2; i++) {
+        float cosTheta = sqrt(max(0.0f, 1.0f - (float(i) + 0.5f) / float(kRaysC2)));
+        float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+        float phi = float(i) * 2.399963229728f + jitter;
+        float3 dir = tbnC2.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+
+        float4 res = traceCascadeInterval(rayOriginC2, dir, kCascadeRanges[2], kCascadeRanges[3],
+                                          sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes,
+                                          bvhNodes, triangles);
+        float3 incomingC3 = 0.5f * (c3_rad[2 * i] + c3_rad[2 * i + 1]);
+        c2_rad[i] = res.xyz + res.w * incomingC3;
+    }
+
+    // ---------------------------------------------------------------------
+    // 3. Cascade 1 (Near-to-mid field: [0.25, 0.80] meters, 32 directions)
+    // Fine-mid spatial probe grid (stride 2 -> 32x32 probes per surface)
+    // Hierarchically merges radiance from Cascade 2
+    // ---------------------------------------------------------------------
+    int bx1 = clamp(int(lx) / 2 * 2, 0, int(kAtlasSurfaceWidth) - 2);
+    int by1 = clamp(int(ly) / 2 * 2, 0, int(kAtlasSurfaceHeight) - 2);
+    float2 uvC1 = (float2(bx1 + 1, by1 + 1) + 0.5f) / kSurfaceRes;
+    float3 probePosC1, probeNorC1;
+    getSurfaceGeometry(surfaceId, uvC1, probePosC1, probeNorC1);
+    Basis tbnC1 = makeTBN(probeNorC1);
+    float3 rayOriginC1 = probePosC1 + probeNorC1 * 0.004f;
+
+    float3 c1_rad[32];
+    for (int i = 0; i < kRaysC1; i++) {
+        float cosTheta = sqrt(max(0.0f, 1.0f - (float(i) + 0.5f) / float(kRaysC1)));
+        float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+        float phi = float(i) * 2.399963229728f + jitter;
+        float3 dir = tbnC1.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+
+        float4 res = traceCascadeInterval(rayOriginC1, dir, kCascadeRanges[1], kCascadeRanges[2],
+                                          sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes,
+                                          bvhNodes, triangles);
+        float3 incomingC2 = 0.5f * (c2_rad[2 * i] + c2_rad[2 * i + 1]);
+        c1_rad[i] = res.xyz + res.w * incomingC2;
+    }
+
+    // ---------------------------------------------------------------------
+    // 4. Cascade 0 (Contact field: [0.005, 0.25] meters, 16 directions)
+    // Full resolution probe grid (stride 1 -> 64x64 probes per surface)
+    // Hierarchically merges radiance from Cascade 1 & integrates irradiance
+    // ---------------------------------------------------------------------
+    float2 uvC0 = (float2(lx, ly) + 0.5f) / kSurfaceRes;
+    float3 probePosC0, probeNorC0;
+    getSurfaceGeometry(surfaceId, uvC0, probePosC0, probeNorC0);
+    Basis tbnC0 = makeTBN(probeNorC0);
+    float3 rayOriginC0 = probePosC0 + probeNorC0 * 0.004f;
+
+    float3 c0_rad[16];
+    float3 accumIrradiance = float3(0.0f);
+    const float dOmegaC0 = (2.0f * kPi) / float(kRaysC0);
+
+    for (int i = 0; i < kRaysC0; i++) {
+        float cosTheta = sqrt(max(0.0f, 1.0f - (float(i) + 0.5f) / float(kRaysC0)));
+        float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+        float phi = float(i) * 2.399963229728f + jitter;
+        float3 dir = tbnC0.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+
+        float4 res = traceCascadeInterval(rayOriginC0, dir, kCascadeRanges[0], kCascadeRanges[1],
+                                          sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes,
+                                          bvhNodes, triangles);
+        float3 incomingC1 = 0.5f * (c1_rad[2 * i] + c1_rad[2 * i + 1]);
+        c0_rad[i] = res.xyz + res.w * incomingC1;
+
+        accumIrradiance += c0_rad[i] * cosTheta * dOmegaC0;
     }
 
     float3 finalIrradiance = accumIrradiance / kPi;
