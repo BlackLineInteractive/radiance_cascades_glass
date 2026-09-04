@@ -12,6 +12,10 @@ A high-performance, multi-backend real-time ray tracing engine demonstrating **R
 > **Experimental Demo / Proof of Concept**
 > This repository is an **experimental research demo and educational prototype**. It explores the application of Radiance Cascades principles to complex dielectric transmission and real-time caustic generation. Because it is a proof-of-concept, it may contain physical simplifications, mathematical approximations, edge-case inaccuracies, or implementation bugs. It is not intended as a drop-in production rendering library.
 
+> [!NOTE]
+> **Developer Note & AI Assistance**
+> AI was used to assist in writing this code due to the high barrier of entry and complexity of Vulkan, as well as to help grasp the intricate mathematics behind Radiance Cascades. It is disheartening to see a double standard in the graphics community where massive corporations are praised for AI generation (e.g., DLSS 5), while solo developers releasing completely free, open-source code with full author attribution are heavily criticized. I am learning, sharing my journey, and hoping to make these complex techniques more accessible.
+
 ---
 
 ## Attribution & Credits
@@ -41,7 +45,7 @@ Created and maintained by **Blackline Interactive**:
 Traditional real-time ray tracing struggles with complex dielectric phenomena (such as multi-interface refraction, chromatic dispersion, rough transmission for frosted glass, and focused photon caustics) due to high sampling noise and prohibitive computational cost.
 
 This engine unifies:
-1. **3D Radiance Cascades Global Illumination**: Hierarchical 4-cascade angular-spatial radiance representation with bounded distance intervals and far-to-near merging across surfaces for smooth indirect bounce lighting and color bleeding.
+1. **3D Radiance Cascades Global Illumination**: Hierarchical 4-cascade angular-spatial radiance representation with bounded distance intervals and far-to-near merging across surfaces for smooth indirect bounce lighting and color bleeding. *(Note: RC is utilized here to calculate diffuse irradiance, which is then integrated with complex dielectric phenomena like specular refraction and rough transmission).*
 2. **Multi-Wavelength Cauchy Dispersion**: Spectral splitting ($R, G, B$) through Newton's prism and crystal spheres using Cauchy's dispersion equation:
    $$n(\lambda) = n_0 + \frac{B}{\lambda^2}$$
 3. **Atomic Caustic Splatting**: Parallel forward photon projection from directional sun rays, refracted through complex glass geometries and accumulated into a 32-bit fixed-point spatial irradiance grid using 32-bit GPU atomics (`atomicAdd`).
