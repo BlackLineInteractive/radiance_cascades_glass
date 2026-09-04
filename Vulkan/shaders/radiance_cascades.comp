@@ -170,7 +170,6 @@ void main() {
 
     vec3 c0_rad[16];
     vec3 accumIrradiance = vec3(0.0);
-    const float dOmegaC0 = (2.0 * kPi) / float(kRaysC0);
 
     for (int i = 0; i < kRaysC0; i++) {
         float cosTheta = sqrt(max(0.0, 1.0 - (float(i) + 0.5) / float(kRaysC0)));
@@ -183,9 +182,9 @@ void main() {
         vec3 incomingC1 = 0.5 * (c1_rad[2 * i] + c1_rad[2 * i + 1]);
         c0_rad[i] = res.rgb + res.w * incomingC1;
 
-        accumIrradiance += c0_rad[i] * cosTheta * dOmegaC0;
+        accumIrradiance += c0_rad[i];
     }
 
-    vec3 finalIrradiance = accumIrradiance / kPi;
+    vec3 finalIrradiance = accumIrradiance / float(kRaysC0);
     imageStore(irradianceAtlas, ivec2(tid), vec4(finalIrradiance, 1.0));
 }

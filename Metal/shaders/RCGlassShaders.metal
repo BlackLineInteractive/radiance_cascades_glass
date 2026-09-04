@@ -775,31 +775,72 @@ constant int kRaysC1 = 32;
 constant int kRaysC2 = 64;
 constant int kRaysC3 = 128;
 
-inline float3 evalSurfaceDirectLighting(
-    HitRecord hit,
-    float3 sunDir,
-    float3 sunCol,
-    float sunInt,
-    uint numNodes,
-    device const GPUBVHNode *bvhNodes,
-    device const GPUTriangle *triangles
+inline float3 sampleSurfaceAtlas(
+    uint surfaceId,
+    float u,
+    float v,
+    texture2d<float, access::sample> atlas
 ) {
-    float NdotL = max(0.0f, dot(hit.normal, sunDir));
-    float3 sunIllum = float3(0.0f);
-    if (NdotL > 0.0f) {
-        Ray sRay;
-        sRay.origin = hit.position + hit.normal * 0.002f;
-        sRay.direction = sunDir;
-        HitRecord sHit = intersectSceneInterval(sRay, false, bvhNodes, triangles, numNodes, 0.001f, 100.0f);
-        if (!sHit.hit) {
-            sunIllum = sunCol * (sunInt * NdotL);
-        }
-    }
-    float3 ambient = float3(0.08f);
-    return (sunIllum + ambient) * hit.albedo;
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float uTexel = (clamp(u, 0.001f, 0.999f) * float(kAtlasSurfaceWidth - 1) + 0.5f) / float(kAtlasSurfaceWidth * kNumSurfaces);
+    float atlasU = (float(surfaceId) / float(kNumSurfaces)) + uTexel;
+    float atlasV = (clamp(v, 0.001f, 0.999f) * float(kAtlasSurfaceHeight - 1) + 0.5f) / float(kAtlasSurfaceHeight);
+    return atlas.sample(s, float2(atlasU, atlasV)).rgb;
 }
 
-// Traces ray strictly within distance interval [tMin, tMax]
+inline float3 sampleIrradianceAtlas(
+    HitRecord hit,
+    texture2d<float, access::sample> irradianceAtlas
+) {
+    if (hit.objectId == 2) {
+        float u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+        float v = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        return sampleSurfaceAtlas(0, u, v, irradianceAtlas);
+    } else if (hit.objectId == 3) {
+        float u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+        float v = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        return sampleSurfaceAtlas(1, u, v, irradianceAtlas);
+    } else if (hit.objectId == 1) {
+        float u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+        float v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+        return sampleSurfaceAtlas(2, u, v, irradianceAtlas);
+    } else if (hit.objectId == 4 || hit.objectId == 6) {
+        float u = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        float v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+        return sampleSurfaceAtlas(3, u, v, irradianceAtlas);
+    } else if (hit.objectId == 5) {
+        float u = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        float v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+        return sampleSurfaceAtlas(4, u, v, irradianceAtlas);
+    }
+
+    // 3D objects in the room (Teapot, sphere, cylinder, prism)
+    float u_xz = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+    float v_xz = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+
+    float u_xy = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+    float v_xy = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+
+    float u_yz = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+    float v_yz = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+
+    float3 irrFloor = sampleSurfaceAtlas(0, u_xz, v_xz, irradianceAtlas);
+    float3 irrCeil  = sampleSurfaceAtlas(1, u_xz, v_xz, irradianceAtlas);
+    float3 irrBack  = sampleSurfaceAtlas(2, u_xy, v_xy, irradianceAtlas);
+    float3 irrLeft  = sampleSurfaceAtlas(3, u_yz, v_yz, irradianceAtlas);
+    float3 irrRight = sampleSurfaceAtlas(4, u_yz, v_yz, irradianceAtlas);
+
+    float wFloor = max(0.0f, -hit.normal.y);
+    float wCeil  = max(0.0f,  hit.normal.y);
+    float wBack  = max(0.0f,  hit.normal.z);
+    float wLeft  = max(0.0f, -hit.normal.x);
+    float wRight = max(0.0f,  hit.normal.x);
+
+    float wSum = wFloor + wCeil + wBack + wLeft + wRight + 1e-4f;
+    return (wFloor * irrFloor + wCeil * irrCeil + wBack * irrBack + wLeft * irrLeft + wRight * irrRight) / wSum;
+}
+
+// Traces ray strictly within distance interval [tMin, tMax] with temporal multi-bounce
 inline float4 traceCascadeInterval(
     float3 origin,
     float3 dir,
@@ -810,14 +851,28 @@ inline float4 traceCascadeInterval(
     float sunInt,
     uint numNodes,
     device const GPUBVHNode *bvhNodes,
-    device const GPUTriangle *triangles
+    device const GPUTriangle *triangles,
+    texture2d<float, access::sample> prevAtlas
 ) {
     Ray probeRay;
     probeRay.origin = origin;
     probeRay.direction = dir;
-    HitRecord hit = intersectSceneInterval(probeRay, false, bvhNodes, triangles, numNodes, tMin, tMax);
+    HitRecord hit = intersectSceneInterval(probeRay, true, bvhNodes, triangles, numNodes, tMin, tMax);
     if (hit.hit) {
-        float3 hitRad = evalSurfaceDirectLighting(hit, sunDir, sunCol, sunInt, numNodes, bvhNodes, triangles);
+        float NdotL = max(0.0f, dot(hit.normal, sunDir));
+        float3 directSun = float3(0.0f);
+        if (NdotL > 0.0f) {
+            Ray sRay;
+            sRay.origin = hit.position + hit.normal * 0.002f;
+            sRay.direction = sunDir;
+            HitRecord sHit = intersectSceneInterval(sRay, false, bvhNodes, triangles, numNodes, 0.001f, 100.0f);
+            if (!sHit.hit) {
+                directSun = sunCol * (sunInt * NdotL);
+            }
+        }
+        float3 bouncedGI = sampleIrradianceAtlas(hit, prevAtlas);
+        float3 hitRad = (directSun + bouncedGI) * hit.albedo;
+
         float tNorm = clamp((hit.distance - tMin) / max(1e-4f, tMax - tMin), 0.0f, 1.0f);
         float boundaryFade = smoothstep(0.85f, 1.0f, tNorm);
         return float4(hitRad, boundaryFade); // w is residual transmittance
@@ -828,6 +883,7 @@ inline float4 traceCascadeInterval(
 kernel void computeRadianceCascadesKernel(
     uint2 tid [[thread_position_in_grid]],
     texture2d<float, access::write> irradianceAtlas [[texture(0)]],
+    texture2d<float, access::sample> prevAtlas [[texture(1)]],
     constant GlassUniforms &uniforms [[buffer(0)]],
     device const GPUBVHNode *bvhNodes [[buffer(1)]],
     device const GPUTriangle *triangles [[buffer(2)]]
@@ -863,9 +919,9 @@ kernel void computeRadianceCascadesKernel(
 
         float4 res = traceCascadeInterval(rayOriginC3, dir, kCascadeRanges[3], kCascadeRanges[4],
                                           sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes,
-                                          bvhNodes, triangles);
+                                          bvhNodes, triangles, prevAtlas);
         if (res.w > 0.0f) {
-            c3_rad[i] = res.xyz + res.w * getSkyRadiance(dir, sunDir) * 1.5f;
+            c3_rad[i] = res.xyz + res.w * getSkyRadiance(dir, sunDir);
         } else {
             c3_rad[i] = res.xyz;
         }
@@ -893,7 +949,7 @@ kernel void computeRadianceCascadesKernel(
 
         float4 res = traceCascadeInterval(rayOriginC2, dir, kCascadeRanges[2], kCascadeRanges[3],
                                           sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes,
-                                          bvhNodes, triangles);
+                                          bvhNodes, triangles, prevAtlas);
         float3 incomingC3 = 0.5f * (c3_rad[2 * i] + c3_rad[2 * i + 1]);
         c2_rad[i] = res.xyz + res.w * incomingC3;
     }
@@ -920,7 +976,7 @@ kernel void computeRadianceCascadesKernel(
 
         float4 res = traceCascadeInterval(rayOriginC1, dir, kCascadeRanges[1], kCascadeRanges[2],
                                           sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes,
-                                          bvhNodes, triangles);
+                                          bvhNodes, triangles, prevAtlas);
         float3 incomingC2 = 0.5f * (c2_rad[2 * i] + c2_rad[2 * i + 1]);
         c1_rad[i] = res.xyz + res.w * incomingC2;
     }
@@ -938,7 +994,6 @@ kernel void computeRadianceCascadesKernel(
 
     float3 c0_rad[16];
     float3 accumIrradiance = float3(0.0f);
-    const float dOmegaC0 = (2.0f * kPi) / float(kRaysC0);
 
     for (int i = 0; i < kRaysC0; i++) {
         float cosTheta = sqrt(max(0.0f, 1.0f - (float(i) + 0.5f) / float(kRaysC0)));
@@ -948,14 +1003,16 @@ kernel void computeRadianceCascadesKernel(
 
         float4 res = traceCascadeInterval(rayOriginC0, dir, kCascadeRanges[0], kCascadeRanges[1],
                                           sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes,
-                                          bvhNodes, triangles);
+                                          bvhNodes, triangles, prevAtlas);
         float3 incomingC1 = 0.5f * (c1_rad[2 * i] + c1_rad[2 * i + 1]);
         c0_rad[i] = res.xyz + res.w * incomingC1;
 
-        accumIrradiance += c0_rad[i] * cosTheta * dOmegaC0;
+        accumIrradiance += c0_rad[i];
     }
 
-    float3 finalIrradiance = accumIrradiance / kPi;
+    float3 newIrradiance = accumIrradiance / float(kRaysC0);
+    float3 prevVal = prevAtlas.read(tid).rgb;
+    float3 finalIrradiance = (uniforms.frameIndex > 1) ? mix(newIrradiance, prevVal, 0.70f) : newIrradiance;
     irradianceAtlas.write(float4(finalIrradiance, 1.0f), tid);
 }
 
@@ -991,57 +1048,6 @@ kernel void filterIrradianceAtlasKernel(
     }
 
     outAtlas.write(float4(accum / max(1e-5f, weightSum), 1.0f), tid);
-}
-
-inline float3 sampleIrradianceAtlas(
-    HitRecord hit,
-    texture2d<float, access::sample> irradianceAtlas
-) {
-    constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float u = 0.0f;
-    float v = 0.0f;
-    float surfaceId = 0.0f;
-
-    if (hit.objectId == 2) {
-        u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
-        v = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
-        surfaceId = 0.0f;
-    } else if (hit.objectId == 3) {
-        u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
-        v = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
-        surfaceId = 1.0f;
-    } else if (hit.objectId == 1) {
-        u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
-        v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
-        surfaceId = 2.0f;
-    } else if (hit.objectId == 4 || hit.objectId == 6) {
-        u = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
-        v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
-        surfaceId = 3.0f;
-    } else if (hit.objectId == 5) {
-        u = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
-        v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
-        surfaceId = 4.0f;
-    } else {
-        float uXZ = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
-        float vXZ = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
-        
-        float uTexelXZ = (clamp(uXZ, 0.0f, 1.0f) * float(kAtlasSurfaceWidth - 1) + 0.5f) / float(kAtlasSurfaceWidth * kNumSurfaces);
-        float atlasVXZ = (clamp(vXZ, 0.0f, 1.0f) * float(kAtlasSurfaceHeight - 1) + 0.5f) / float(kAtlasSurfaceHeight);
-        
-        float atlasU_Floor = (0.0f / float(kNumSurfaces)) + uTexelXZ;
-        float atlasU_Ceil  = (1.0f / float(kNumSurfaces)) + uTexelXZ;
-        
-        float h = saturate((hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY));
-        return mix(irradianceAtlas.sample(s, float2(atlasU_Floor, atlasVXZ)).rgb,
-                   irradianceAtlas.sample(s, float2(atlasU_Ceil,  atlasVXZ)).rgb, h);
-    }
-
-    float uTexel = (clamp(u, 0.0f, 1.0f) * float(kAtlasSurfaceWidth - 1) + 0.5f) / float(kAtlasSurfaceWidth * kNumSurfaces);
-    float atlasU = (surfaceId / float(kNumSurfaces)) + uTexel;
-    float atlasV = (clamp(v, 0.0f, 1.0f) * float(kAtlasSurfaceHeight - 1) + 0.5f) / float(kAtlasSurfaceHeight);
-
-    return irradianceAtlas.sample(s, float2(atlasU, atlasV)).rgb;
 }
 
 inline float3 evaluateSurfaceRadiance(
@@ -1083,21 +1089,13 @@ inline float3 evaluateSurfaceRadiance(
         }
     }
 
-    float skyFactor = saturate(0.5f + 0.5f * hit.normal.y);
-    float3 roomAmbient = float3(0.32f, 0.35f, 0.40f) * uniforms.ambientIntensity * skyFactor;
-
-    float distLeft = max(0.1f, hit.position.x - kRoomMinX);
-    float3 redBleed = float3(0.85f, 0.12f, 0.12f) * (max(0.0f, hit.normal.x) / (distLeft * distLeft + 1.0f)) * 0.45f;
-
-    float distRight = max(0.1f, kRoomMaxX - hit.position.x);
-    float3 greenBleed = float3(0.12f, 0.85f, 0.15f) * (max(0.0f, -hit.normal.x) / (distRight * distRight + 1.0f)) * 0.45f;
-
     float3 indirectGI = float3(0.0f);
     if (useCascadeGI) {
         float3 E = sampleIrradianceAtlas(hit, irradianceAtlas);
-        indirectGI = (E + roomAmbient + redBleed + greenBleed) * hit.albedo;
+        indirectGI = E * hit.albedo;
     } else {
-        indirectGI = (roomAmbient + redBleed + greenBleed + float3(0.10f)) * hit.albedo;
+        float3 baselineAmbient = float3(0.04f);
+        indirectGI = baselineAmbient * hit.albedo;
     }
 
     return (directSun + causticRad) * hit.albedo + indirectGI;

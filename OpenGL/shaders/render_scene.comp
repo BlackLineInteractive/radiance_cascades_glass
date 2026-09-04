@@ -23,51 +23,60 @@ layout(binding = 9) uniform sampler2D samplerCausticTexture;
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-vec3 sampleIrradianceAtlas(HitRecord hit) {
-    float u = 0.0;
-    float v = 0.0;
-    float surfaceId = 0.0;
+vec3 sampleSurfaceAtlas(uint surfaceId, float u, float v) {
+    float uTexel = (clamp(u, 0.001, 0.999) * float(kAtlasSurfaceWidth - 1u) + 0.5) / float(kAtlasSurfaceWidth * kNumSurfaces);
+    float atlasU = (float(surfaceId) / float(kNumSurfaces)) + uTexel;
+    float atlasV = (clamp(v, 0.001, 0.999) * float(kAtlasSurfaceHeight - 1u) + 0.5) / float(kAtlasSurfaceHeight);
+    return texture(samplerIrradianceAtlas, vec2(atlasU, atlasV)).rgb;
+}
 
+vec3 sampleIrradianceAtlas(HitRecord hit) {
     if (hit.objectId == 2u) {
-        u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
-        v = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
-        surfaceId = 0.0;
+        float u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+        float v = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        return sampleSurfaceAtlas(0u, u, v);
     } else if (hit.objectId == 3u) {
-        u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
-        v = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
-        surfaceId = 1.0;
+        float u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+        float v = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        return sampleSurfaceAtlas(1u, u, v);
     } else if (hit.objectId == 1u) {
-        u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
-        v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
-        surfaceId = 2.0;
+        float u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+        float v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+        return sampleSurfaceAtlas(2u, u, v);
     } else if (hit.objectId == 4u || hit.objectId == 6u) {
-        u = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
-        v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
-        surfaceId = 3.0;
+        float u = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        float v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+        return sampleSurfaceAtlas(3u, u, v);
     } else if (hit.objectId == 5u) {
-        u = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
-        v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
-        surfaceId = 4.0;
-    } else {
-        float uXZ = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
-        float vXZ = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
-        
-        float uTexelXZ = (clamp(uXZ, 0.0, 1.0) * float(kAtlasSurfaceWidth - 1u) + 0.5) / float(kAtlasSurfaceWidth * kNumSurfaces);
-        float atlasVXZ = (clamp(vXZ, 0.0, 1.0) * float(kAtlasSurfaceHeight - 1u) + 0.5) / float(kAtlasSurfaceHeight);
-        
-        float atlasU_Floor = (0.0 / float(kNumSurfaces)) + uTexelXZ;
-        float atlasU_Ceil  = (1.0 / float(kNumSurfaces)) + uTexelXZ;
-        
-        float h = saturate((hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY));
-        return mix(texture(samplerIrradianceAtlas, vec2(atlasU_Floor, atlasVXZ)).rgb,
-                   texture(samplerIrradianceAtlas, vec2(atlasU_Ceil,  atlasVXZ)).rgb, h);
+        float u = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        float v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+        return sampleSurfaceAtlas(4u, u, v);
     }
 
-    float uTexel = (clamp(u, 0.0, 1.0) * float(kAtlasSurfaceWidth - 1u) + 0.5) / float(kAtlasSurfaceWidth * kNumSurfaces);
-    float atlasU = (surfaceId / float(kNumSurfaces)) + uTexel;
-    float atlasV = (clamp(v, 0.0, 1.0) * float(kAtlasSurfaceHeight - 1u) + 0.5) / float(kAtlasSurfaceHeight);
+    // 3D objects in the room (Teapot, sphere, cylinder, prism)
+    float u_xz = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+    float v_xz = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
 
-    return texture(samplerIrradianceAtlas, vec2(atlasU, atlasV)).rgb;
+    float u_xy = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+    float v_xy = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+
+    float u_yz = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+    float v_yz = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+
+    vec3 irrFloor = sampleSurfaceAtlas(0u, u_xz, v_xz);
+    vec3 irrCeil  = sampleSurfaceAtlas(1u, u_xz, v_xz);
+    vec3 irrBack  = sampleSurfaceAtlas(2u, u_xy, v_xy);
+    vec3 irrLeft  = sampleSurfaceAtlas(3u, u_yz, v_yz);
+    vec3 irrRight = sampleSurfaceAtlas(4u, u_yz, v_yz);
+
+    float wFloor = max(0.0, -hit.normal.y);
+    float wCeil  = max(0.0,  hit.normal.y);
+    float wBack  = max(0.0,  hit.normal.z);
+    float wLeft  = max(0.0, -hit.normal.x);
+    float wRight = max(0.0,  hit.normal.x);
+
+    float wSum = wFloor + wCeil + wBack + wLeft + wRight + 1e-4;
+    return (wFloor * irrFloor + wCeil * irrCeil + wBack * irrBack + wLeft * irrLeft + wRight * irrRight) / wSum;
 }
 
 vec3 evaluateSurfaceRadiance(HitRecord hit, Ray ray, bool useCascadeGI) {
@@ -99,21 +108,13 @@ vec3 evaluateSurfaceRadiance(HitRecord hit, Ray ray, bool useCascadeGI) {
         }
     }
 
-    float skyFactor = saturate(0.5 + 0.5 * hit.normal.y);
-    vec3 roomAmbient = vec3(0.32, 0.35, 0.40) * uniforms.ambientIntensity * skyFactor;
-
-    float distLeft = max(0.1, hit.position.x - kRoomMinX);
-    vec3 redBleed = vec3(0.85, 0.12, 0.12) * (max(0.0, hit.normal.x) / (distLeft * distLeft + 1.0)) * 0.45;
-
-    float distRight = max(0.1, kRoomMaxX - hit.position.x);
-    vec3 greenBleed = vec3(0.12, 0.85, 0.15) * (max(0.0, -hit.normal.x) / (distRight * distRight + 1.0)) * 0.45;
-
     vec3 indirectGI = vec3(0.0);
     if (useCascadeGI) {
         vec3 E = sampleIrradianceAtlas(hit);
-        indirectGI = (E + roomAmbient + redBleed + greenBleed) * hit.albedo;
+        indirectGI = E * hit.albedo;
     } else {
-        indirectGI = (roomAmbient + redBleed + greenBleed + vec3(0.10)) * hit.albedo;
+        vec3 baselineAmbient = vec3(0.04);
+        indirectGI = baselineAmbient * hit.albedo;
     }
 
     return (directSun + causticRad) * hit.albedo + indirectGI;

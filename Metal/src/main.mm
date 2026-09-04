@@ -305,6 +305,7 @@ void renderFrame(
         id<MTLComputeCommandEncoder> rcEnc = [cmdBuffer computeCommandEncoder];
         [rcEnc setComputePipelineState:state.cascadePipeline];
         [rcEnc setTexture:state.irradianceAtlas atIndex:0];
+        [rcEnc setTexture:state.filteredIrradianceAtlas atIndex:1];
         [rcEnc setBuffer:uniformBuffer offset:0 atIndex:0];
         if (state.teapotNodeBuffer) [rcEnc setBuffer:state.teapotNodeBuffer offset:0 atIndex:1];
         if (state.teapotTriBuffer)  [rcEnc setBuffer:state.teapotTriBuffer offset:0 atIndex:2];
