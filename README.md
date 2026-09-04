@@ -18,7 +18,8 @@ A high-performance, multi-backend real-time ray tracing engine demonstrating **R
 
 The **Radiance Cascades** algorithm was conceived and pioneered by **Alexander Sannikov**, who introduced the revolutionary concept in his 2023/2024 research:
 - **Alexander Sannikov** – *“Radiance Cascades: A Novel Approach to Calculating Global Illumination”* (2023/2024).
-- Website & Publications: [https://github.com/Raikiri/RadianceCascades](https://github.com/Raikiri/RadianceCascades)
+- Repository: [https://github.com/Raikiri/RadianceCascadesPaper](https://github.com/Raikiri/RadianceCascadesPaper)
+- Direct PDF: [RadianceCascades.pdf](https://github.com/Raikiri/RadianceCascadesPaper/blob/main/out_latexmk2/RadianceCascades.pdf)
 
 We express our sincere gratitude and respect to Alexander Sannikov and the real-time computer graphics community for publishing this breakthrough paradigm and demonstrating hierarchical angular-spatial radiance representations. This project builds upon these mathematical foundations to study how cascading radiance integrates with complex curved glass, spectral dispersion, and atomic photon splatting.
 
