@@ -1,0 +1,87 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "../../common/scene_rt.glsl"
+
+layout(std140, set = 0, binding = 0) uniform UniformBuffer {
+    GlassUniformsData uniforms;
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer BVHBuffer {
+    GPUBVHNode bvhNodes[];
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer TriBuffer {
+    GPUTriangle triangles[];
+};
+
+layout(set = 0, binding = 4, rgba32f) uniform writeonly image2D irradianceAtlas;
+
+#include "../../common/scene_intersect.glsl"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    if (tid.x >= kAtlasSurfaceWidth * kNumSurfaces || tid.y >= kAtlasSurfaceHeight) return;
+
+    uint surfaceId = tid.x / kAtlasSurfaceWidth;
+    uint lx = tid.x % kAtlasSurfaceWidth;
+    uint ly = tid.y;
+    vec2 uv = (vec2(lx, ly) + 0.5) / vec2(float(kAtlasSurfaceWidth), float(kAtlasSurfaceHeight));
+
+    vec3 probePos, probeNor;
+    getSurfaceGeometry(surfaceId, uv, probePos, probeNor);
+
+    Basis tbn = makeTBN(probeNor);
+    vec3 sunDir = normalize(uniforms.sunDirection);
+
+    float jitter = fract(sin(dot(vec2(lx, ly) + vec2(float(surfaceId) * 37.0), vec2(12.9898, 78.233))) * 43758.5453) * (2.0 * kPi);
+
+    const int kRays = 128;
+    const float dOmega = (2.0 * kPi) / float(kRays);
+
+    vec3 accumIrradiance = vec3(0.0);
+
+    for (int i = 0; i < kRays; i++) {
+        float cosTheta = sqrt(max(0.0, 1.0 - (float(i) + 0.5) / float(kRays)));
+        float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+        float phi = float(i) * 2.399963229728 + jitter;
+
+        vec3 localDir = vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+        vec3 rayDir = basisToWorld(tbn, localDir);
+
+        Ray probeRay;
+        probeRay.origin = probePos + probeNor * 0.004;
+        probeRay.direction = rayDir;
+
+        HitRecord hit = intersectScene(probeRay, false, 0u);
+
+        vec3 incidentRad = vec3(0.0);
+
+        if (!hit.hit) {
+            float hFactor = saturate(rayDir.y * 1.5);
+            vec3 sky = mix(vec3(0.78, 0.85, 0.95), vec3(0.40, 0.62, 0.95), hFactor);
+            incidentRad = sky * 1.5;
+        } else {
+            float NdotL = max(0.0, dot(hit.normal, sunDir));
+            vec3 sunIllum = vec3(0.0);
+            if (NdotL > 0.0) {
+                Ray sRay;
+                sRay.origin = hit.position + hit.normal * 0.004;
+                sRay.direction = sunDir;
+                HitRecord sHit = intersectScene(sRay, false, 0u);
+                if (!sHit.hit) {
+                    sunIllum = uniforms.sunColor * (uniforms.sunIntensity * NdotL);
+                }
+            }
+            vec3 ambientBleed = vec3(0.08);
+            incidentRad = (sunIllum + ambientBleed) * hit.albedo;
+        }
+
+        accumIrradiance += incidentRad * cosTheta * dOmega;
+    }
+
+    vec3 finalIrradiance = accumIrradiance / kPi;
+    imageStore(irradianceAtlas, ivec2(tid), vec4(finalIrradiance, 1.0));
+}

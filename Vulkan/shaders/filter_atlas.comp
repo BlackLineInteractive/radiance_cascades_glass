@@ -1,0 +1,40 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "../../common/scene_rt.glsl"
+
+layout(set = 0, binding = 4, rgba32f) readonly uniform image2D inAtlas;
+layout(set = 0, binding = 5, rgba32f) writeonly uniform image2D outAtlas;
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    if (tid.x >= kAtlasSurfaceWidth * kNumSurfaces || tid.y >= kAtlasSurfaceHeight) return;
+
+    uint surfaceId = tid.x / kAtlasSurfaceWidth;
+    uint lx = tid.x % kAtlasSurfaceWidth;
+    uint ly = tid.y;
+
+    const int kRadius = 3;
+    const float sigma = 2.0;
+    const float twoSigma2 = 2.0 * sigma * sigma;
+
+    vec3 accum = vec3(0.0);
+    float weightSum = 0.0;
+
+    for (int dy = -kRadius; dy <= kRadius; dy++) {
+        int sy = clamp(int(ly) + dy, 0, int(kAtlasSurfaceHeight) - 1);
+        for (int dx = -kRadius; dx <= kRadius; dx++) {
+            int sx = clamp(int(lx) + dx, 0, int(kAtlasSurfaceWidth) - 1);
+            float dist2 = float(dx * dx + dy * dy);
+            float w = exp(-dist2 / twoSigma2);
+
+            ivec2 sampleCoord = ivec2(surfaceId * kAtlasSurfaceWidth + uint(sx), uint(sy));
+            accum += imageLoad(inAtlas, sampleCoord).rgb * w;
+            weightSum += w;
+        }
+    }
+
+    imageStore(outAtlas, ivec2(tid), vec4(accum / max(1e-5, weightSum), 1.0));
+}

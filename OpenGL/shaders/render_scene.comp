@@ -1,0 +1,338 @@
+#version 430 core
+#extension GL_GOOGLE_include_directive : enable
+
+#include "../../common/scene_rt.glsl"
+
+layout(std140, binding = 0) uniform UniformBuffer {
+    GlassUniformsData uniforms;
+};
+
+layout(std430, binding = 1) readonly buffer BVHBuffer {
+    GPUBVHNode bvhNodes[];
+};
+
+layout(std430, binding = 2) readonly buffer TriBuffer {
+    GPUTriangle triangles[];
+};
+
+layout(binding = 7, rgba32f) writeonly uniform image2D outTexture;
+layout(binding = 8) uniform sampler2D samplerIrradianceAtlas;
+layout(binding = 9) uniform sampler2D samplerCausticTexture;
+
+#include "../../common/scene_intersect.glsl"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+vec3 sampleIrradianceAtlas(HitRecord hit) {
+    float u = 0.0;
+    float v = 0.0;
+    float surfaceId = 0.0;
+
+    if (hit.objectId == 2u) {
+        u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+        v = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        surfaceId = 0.0;
+    } else if (hit.objectId == 3u) {
+        u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+        v = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        surfaceId = 1.0;
+    } else if (hit.objectId == 1u) {
+        u = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+        v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+        surfaceId = 2.0;
+    } else if (hit.objectId == 4u || hit.objectId == 6u) {
+        u = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+        surfaceId = 3.0;
+    } else if (hit.objectId == 5u) {
+        u = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        v = (hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY);
+        surfaceId = 4.0;
+    } else {
+        float uXZ = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
+        float vXZ = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
+        
+        float uTexelXZ = (clamp(uXZ, 0.0, 1.0) * float(kAtlasSurfaceWidth - 1u) + 0.5) / float(kAtlasSurfaceWidth * kNumSurfaces);
+        float atlasVXZ = (clamp(vXZ, 0.0, 1.0) * float(kAtlasSurfaceHeight - 1u) + 0.5) / float(kAtlasSurfaceHeight);
+        
+        float atlasU_Floor = (0.0 / float(kNumSurfaces)) + uTexelXZ;
+        float atlasU_Ceil  = (1.0 / float(kNumSurfaces)) + uTexelXZ;
+        
+        float h = saturate((hit.position.y - kRoomMinY) / (kRoomMaxY - kRoomMinY));
+        return mix(texture(samplerIrradianceAtlas, vec2(atlasU_Floor, atlasVXZ)).rgb,
+                   texture(samplerIrradianceAtlas, vec2(atlasU_Ceil,  atlasVXZ)).rgb, h);
+    }
+
+    float uTexel = (clamp(u, 0.0, 1.0) * float(kAtlasSurfaceWidth - 1u) + 0.5) / float(kAtlasSurfaceWidth * kNumSurfaces);
+    float atlasU = (surfaceId / float(kNumSurfaces)) + uTexel;
+    float atlasV = (clamp(v, 0.0, 1.0) * float(kAtlasSurfaceHeight - 1u) + 0.5) / float(kAtlasSurfaceHeight);
+
+    return texture(samplerIrradianceAtlas, vec2(atlasU, atlasV)).rgb;
+}
+
+vec3 evaluateSurfaceRadiance(HitRecord hit, Ray ray, bool useCascadeGI) {
+    if (!hit.hit) {
+        return getSkyRadiance(ray.direction, normalize(uniforms.sunDirection));
+    }
+
+    vec3 L = normalize(uniforms.sunDirection);
+    float NdotL = max(0.0, dot(hit.normal, L));
+    vec3 directSun = vec3(0.0);
+
+    if (NdotL > 0.0) {
+        Ray shadowRay;
+        shadowRay.origin = hit.position + hit.normal * 0.002;
+        shadowRay.direction = L;
+
+        HitRecord shadowHit = intersectScene(shadowRay, false, 0u);
+        if (!shadowHit.hit) {
+            directSun = uniforms.sunColor * (uniforms.sunIntensity * NdotL);
+        }
+    }
+
+    vec3 causticRad = vec3(0.0);
+    if (hit.objectId == 2u) {
+        float uFloor = (hit.position.x - kFloorMinX) / (kFloorMaxX - kFloorMinX);
+        float vFloor = (hit.position.z - kFloorMinZ) / (kFloorMaxZ - kFloorMinZ);
+        if (uFloor >= 0.0 && uFloor <= 1.0 && vFloor >= 0.0 && vFloor <= 1.0) {
+            causticRad = texture(samplerCausticTexture, vec2(uFloor, vFloor)).rgb;
+        }
+    }
+
+    float skyFactor = saturate(0.5 + 0.5 * hit.normal.y);
+    vec3 roomAmbient = vec3(0.32, 0.35, 0.40) * uniforms.ambientIntensity * skyFactor;
+
+    float distLeft = max(0.1, hit.position.x - kRoomMinX);
+    vec3 redBleed = vec3(0.85, 0.12, 0.12) * (max(0.0, hit.normal.x) / (distLeft * distLeft + 1.0)) * 0.45;
+
+    float distRight = max(0.1, kRoomMaxX - hit.position.x);
+    vec3 greenBleed = vec3(0.12, 0.85, 0.15) * (max(0.0, -hit.normal.x) / (distRight * distRight + 1.0)) * 0.45;
+
+    vec3 indirectGI = vec3(0.0);
+    if (useCascadeGI) {
+        vec3 E = sampleIrradianceAtlas(hit);
+        indirectGI = (E + roomAmbient + redBleed + greenBleed) * hit.albedo;
+    } else {
+        indirectGI = (roomAmbient + redBleed + greenBleed + vec3(0.10)) * hit.albedo;
+    }
+
+    return (directSun + causticRad) * hit.albedo + indirectGI;
+}
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    if (tid.x >= uniforms.width || tid.y >= uniforms.height) return;
+
+    vec2 uv = (vec2(tid) + 0.5) / vec2(float(uniforms.width), float(uniforms.height));
+    vec2 ndc = uv * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+
+    vec4 clipPos = vec4(ndc.x, ndc.y, 1.0, 1.0);
+    vec4 viewPos = uniforms.projectionInverse * clipPos;
+    viewPos /= viewPos.w;
+    vec3 worldDir = normalize((uniforms.viewInverse * vec4(viewPos.xyz, 0.0)).xyz);
+
+    Ray primaryRay;
+    primaryRay.origin = uniforms.cameraPosition;
+    primaryRay.direction = worldDir;
+
+    HitRecord primaryHit = intersectScene(primaryRay, true, uniforms.numTeapotNodes);
+
+    vec3 pixelColor = vec3(0.0);
+
+    if (!primaryHit.hit) {
+        pixelColor = getSkyRadiance(primaryRay.direction, normalize(uniforms.sunDirection));
+    } else if (!primaryHit.isGlass) {
+        pixelColor = evaluateSurfaceRadiance(primaryHit, primaryRay, uniforms.renderMode != 0u);
+    } else {
+        vec3 P1 = primaryHit.position;
+        vec3 N1 = primaryHit.normal;
+        vec3 V = -primaryRay.direction;
+        float cosThetaI = clamp(dot(N1, V), 0.0, 1.0);
+
+        float objIor = primaryHit.ior;
+        float objDisp = primaryHit.dispersion;
+        vec3 objAbs = primaryHit.absorption;
+
+        if (uniforms.renderMode == 0u) {
+            float F = dielectricFresnel(cosThetaI, 1.0, objIor);
+
+            vec3 R = reflect(primaryRay.direction, N1);
+            Ray reflRay;
+            reflRay.origin = P1 + N1 * 0.002;
+            reflRay.direction = R;
+            HitRecord reflHit = intersectScene(reflRay, false, 0u);
+            vec3 reflColor = evaluateSurfaceRadiance(reflHit, reflRay, false);
+
+            vec3 T;
+            vec3 refrColor = vec3(0.0);
+            if (refractRay(primaryRay.direction, N1, 1.0 / objIor, T)) {
+                Ray insideRay;
+                insideRay.origin = P1 - N1 * 0.002;
+                insideRay.direction = T;
+
+                float tExit;
+                vec3 nExit;
+                bool exitOk = false;
+                if (primaryHit.objectId == 10u) {
+                    exitOk = intersectTeapotBVH(insideRay, uniforms.numTeapotNodes, tExit, nExit);
+                } else if (primaryHit.objectId == 11u) {
+                    exitOk = intersectSphere(insideRay, kSphereCenter, kSphereRadius, tExit, nExit);
+                } else if (primaryHit.objectId == 12u) {
+                    exitOk = intersectCylinder(insideRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, tExit, nExit);
+                } else {
+                    exitOk = intersectTriangularPrism(insideRay, kPrismCenter, kPrismSide, kPrismHeight, tExit, nExit);
+                }
+
+                if (exitOk) {
+                    vec3 P2 = insideRay.origin + insideRay.direction * tExit;
+                    vec3 N2 = -nExit;
+                    vec3 T2;
+                    if (refractRay(T, N2, objIor / 1.0, T2)) {
+                        Ray exitRay;
+                        exitRay.origin = P2 + T2 * 0.005;
+                        exitRay.direction = T2;
+                        HitRecord exitHit = intersectScene(exitRay, false, 0u);
+                        refrColor = evaluateSurfaceRadiance(exitHit, exitRay, false);
+                    }
+                }
+            }
+
+            pixelColor = F * reflColor + (1.0 - F) * refrColor;
+        } else {
+            float disp = (uniforms.renderMode == 3u) ? (objDisp * 1.6) : objDisp;
+            float iorR = objIor - disp;
+            float iorG = objIor;
+            float iorB = objIor + disp;
+
+            float F_R = dielectricFresnel(cosThetaI, 1.0, iorR);
+            float F_G = dielectricFresnel(cosThetaI, 1.0, iorG);
+            float F_B = dielectricFresnel(cosThetaI, 1.0, iorB);
+            vec3 F = vec3(F_R, F_G, F_B);
+
+            vec3 reflDir = reflect(primaryRay.direction, N1);
+            Ray reflRay;
+            reflRay.origin = P1 + N1 * 0.003;
+            reflRay.direction = reflDir;
+            HitRecord reflHit = intersectScene(reflRay, false, 0u);
+            vec3 reflColor = evaluateSurfaceRadiance(reflHit, reflRay, true);
+
+            vec3 T_R, T_G, T_B;
+            bool okR = refractRay(primaryRay.direction, N1, 1.0 / iorR, T_R);
+            bool okG = refractRay(primaryRay.direction, N1, 1.0 / iorG, T_G);
+            bool okB = refractRay(primaryRay.direction, N1, 1.0 / iorB, T_B);
+
+            vec3 refrColor = vec3(0.0);
+
+            if (okG) {
+                Ray insideRayG;
+                insideRayG.origin = P1 + T_G * 0.003;
+                insideRayG.direction = T_G;
+
+                float tExit;
+                vec3 nExit;
+                bool exitOk = false;
+
+                if (primaryHit.objectId == 10u) {
+                    exitOk = intersectTeapotBVH(insideRayG, uniforms.numTeapotNodes, tExit, nExit);
+                } else if (primaryHit.objectId == 11u) {
+                    exitOk = intersectSphere(insideRayG, kSphereCenter, kSphereRadius, tExit, nExit);
+                } else if (primaryHit.objectId == 12u) {
+                    exitOk = intersectCylinder(insideRayG, kCylinderCenter, kCylinderRadius, kCylinderHeight, tExit, nExit);
+                } else if (primaryHit.objectId == 13u) {
+                    exitOk = intersectTriangularPrism(insideRayG, kPrismCenter, kPrismSide, kPrismHeight, tExit, nExit);
+                } else {
+                    vec3 slabMin = vec3(1.00, 0.0, 0.35);
+                    vec3 slabMax = vec3(1.70, 0.06, 1.05);
+                    exitOk = intersectBox(insideRayG, slabMin, slabMax, tExit, nExit);
+                }
+
+                if (exitOk) {
+                    float internalDist = tExit;
+                    vec3 P2 = insideRayG.origin + insideRayG.direction * tExit;
+                    vec3 N2 = -nExit;
+
+                    vec3 absorption = beerLambertAbsorption(objAbs, internalDist);
+
+                    vec3 T2_R, T2_G, T2_B;
+                    bool exitOkR = refractRay(okR ? T_R : T_G, N2, iorR / 1.0, T2_R);
+                    bool exitOkG = refractRay(T_G, N2, iorG / 1.0, T2_G);
+                    bool exitOkB = refractRay(okB ? T_B : T_G, N2, iorB / 1.0, T2_B);
+
+                    if (uniforms.renderMode == 2u) {
+                        float coneAngle = uniforms.glassRoughness * 0.28;
+                        vec3 wT = normalize(exitOkG ? T2_G : reflect(T_G, nExit));
+                        vec3 upVec = abs(wT.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+                        vec3 uVec = normalize(cross(wT, upVec));
+                        vec3 vVec = cross(wT, uVec);
+
+                        const vec2 discOffsets[9] = {
+                            vec2(0.0, 0.0),
+                            vec2(0.7, 0.0), vec2(-0.7, 0.0),
+                            vec2(0.0, 0.7), vec2(0.0, -0.7),
+                            vec2(0.5, 0.5), vec2(-0.5, 0.5),
+                            vec2(0.5, -0.5), vec2(-0.5, -0.5)
+                        };
+                        const float weights[9] = {
+                            0.28, 0.09, 0.09, 0.09, 0.09, 0.09, 0.09, 0.09, 0.09
+                        };
+
+                        vec3 accumRad = vec3(0.0);
+                        for (int s = 0; s < 9; s++) {
+                            vec2 off = discOffsets[s] * coneAngle;
+                            vec3 sampleDir = normalize(wT + off.x * uVec + off.y * vVec);
+
+                            Ray coneRay;
+                            coneRay.origin = P2 + sampleDir * 0.005;
+                            coneRay.direction = sampleDir;
+                            HitRecord coneHit = intersectScene(coneRay, false, 0u);
+                            accumRad += weights[s] * evaluateSurfaceRadiance(coneHit, coneRay, true);
+                        }
+                        refrColor = accumRad * absorption;
+                    } else {
+                        vec3 dirR = exitOkR ? T2_R : reflect(okR ? T_R : T_G, nExit);
+                        Ray exitRayR;
+                        exitRayR.origin = P2 + dirR * 0.012;
+                        exitRayR.direction = dirR;
+                        HitRecord hitR = intersectScene(exitRayR, false, 0u);
+                        float radR = evaluateSurfaceRadiance(hitR, exitRayR, true).r;
+
+                        vec3 dirG = exitOkG ? T2_G : reflect(T_G, nExit);
+                        Ray exitRayG;
+                        exitRayG.origin = P2 + dirG * 0.012;
+                        exitRayG.direction = dirG;
+                        HitRecord hitG = intersectScene(exitRayG, false, 0u);
+                        float radG = evaluateSurfaceRadiance(hitG, exitRayG, true).g;
+
+                        vec3 dirB = exitOkB ? T2_B : reflect(okB ? T_B : T_G, nExit);
+                        Ray exitRayB;
+                        exitRayB.origin = P2 + dirB * 0.012;
+                        exitRayB.direction = dirB;
+                        HitRecord hitB = intersectScene(exitRayB, false, 0u);
+                        float radB = evaluateSurfaceRadiance(hitB, exitRayB, true).b;
+
+                        refrColor = vec3(radR, radG, radB) * absorption;
+                    }
+                } else {
+                    Ray escapeRay;
+                    escapeRay.origin = P1 + T_G * 0.02;
+                    escapeRay.direction = T_G;
+                    HitRecord escapeHit = intersectScene(escapeRay, false, 0u);
+                    refrColor = evaluateSurfaceRadiance(escapeHit, escapeRay, true);
+                }
+            }
+
+            pixelColor = F * reflColor + (vec3(1.0) - F) * refrColor;
+
+            vec3 L = normalize(uniforms.sunDirection);
+            vec3 H = normalize(L + V);
+            float NdotH = max(0.0, dot(N1, H));
+            float specPow = (uniforms.renderMode == 2u) ? 24.0 : 512.0;
+            float specHighlight = (NdotH > 1e-4) ? (pow(NdotH, specPow) * 1.5) : 0.0;
+            pixelColor += uniforms.sunColor * uniforms.sunIntensity * specHighlight * F;
+        }
+    }
+
+    vec3 finalColor = toneMapACES(pixelColor);
+    imageStore(outTexture, ivec2(tid), vec4(finalColor, 1.0));
+}

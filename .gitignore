@@ -1,0 +1,21 @@
+# OS
+.DS_Store
+
+# Build artifacts
+build/
+bin/
+*.o
+*.air
+*.dSYM
+
+# Executables
+Metal/rc_glass_app
+Vulkan/rc_glass_vk
+OpenGL/rc_glass_gl
+rc_glass_app
+rc_glass_vk
+rc_glass_gl
+
+# Shaders (generated binaries)
+Metal/shaders/*.metallib
+Vulkan/shaders/*.spv

@@ -1,0 +1,338 @@
+#version 430 core
+#extension GL_GOOGLE_include_directive : enable
+
+#include "../../common/scene_rt.glsl"
+
+layout(std140, binding = 0) uniform UniformBuffer {
+    GlassUniformsData uniforms;
+};
+
+layout(std430, binding = 1) readonly buffer BVHBuffer {
+    GPUBVHNode bvhNodes[];
+};
+
+layout(std430, binding = 2) readonly buffer TriBuffer {
+    GPUTriangle triangles[];
+};
+
+layout(std430, binding = 3) buffer CausticBuffer {
+    uint causticData[];
+};
+
+#include "../../common/scene_intersect.glsl"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+const float kFixedScale = 1000000000.0;
+
+void splatBilinear(float hitFloorX, float hitFloorZ, float flux, uint ch) {
+    float uNorm = (hitFloorX - kFloorMinX) / (kFloorMaxX - kFloorMinX);
+    float vNorm = (hitFloorZ - kFloorMinZ) / (kFloorMaxZ - kFloorMinZ);
+
+    float gx = uNorm * float(kCausticRes) - 0.5;
+    float gy = vNorm * float(kCausticRes) - 0.5;
+
+    int x0 = int(floor(gx));
+    int y0 = int(floor(gy));
+    float fx = gx - float(x0);
+    float fy = gy - float(y0);
+
+    float w00 = (1.0 - fx) * (1.0 - fy);
+    float w10 = fx * (1.0 - fy);
+    float w01 = (1.0 - fx) * fy;
+    float w11 = fx * fy;
+
+    int res = int(kCausticRes);
+    if (x0 >= 0 && x0 < res && y0 >= 0 && y0 < res) {
+        uint idx = (uint(y0) * kCausticRes + uint(x0)) * 4u + ch;
+        atomicAdd(causticData[idx], uint(flux * w00 * kFixedScale));
+    }
+    if (x0 + 1 >= 0 && x0 + 1 < res && y0 >= 0 && y0 < res) {
+        uint idx = (uint(y0) * kCausticRes + uint(x0 + 1)) * 4u + ch;
+        atomicAdd(causticData[idx], uint(flux * w10 * kFixedScale));
+    }
+    if (x0 >= 0 && x0 < res && y0 + 1 >= 0 && y0 + 1 < res) {
+        uint idx = (uint(y0 + 1) * kCausticRes + uint(x0)) * 4u + ch;
+        atomicAdd(causticData[idx], uint(flux * w01 * kFixedScale));
+    }
+    if (x0 + 1 >= 0 && x0 + 1 < res && y0 + 1 >= 0 && y0 + 1 < res) {
+        uint idx = (uint(y0 + 1) * kCausticRes + uint(x0 + 1)) * 4u + ch;
+        atomicAdd(causticData[idx], uint(flux * w11 * kFixedScale));
+    }
+}
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    if (tid.x >= 2048u || tid.y >= 2048u) return;
+
+    uint qX = tid.x / 1024u;
+    uint qY = tid.y / 1024u;
+    uint quadrant = qX + qY * 2u;
+
+    uint lx = tid.x % 1024u;
+    uint ly = tid.y % 1024u;
+    vec2 uv = (vec2(lx, ly) + 0.5) / 1024.0;
+
+    vec3 L = normalize(uniforms.sunDirection);
+    vec3 lightDir = -L;
+
+    vec3 up = abs(L.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 uAxis = normalize(cross(L, up));
+    vec3 vAxis = cross(L, uAxis);
+
+    if (quadrant == 0u) {
+        float sx = (uv.x - 0.5) * (2.0 * kSphereRadius);
+        float sy = (uv.y - 0.5) * (2.0 * kSphereRadius);
+        float s2 = sx * sx + sy * sy;
+        if (s2 >= kSphereRadius * kSphereRadius) return;
+
+        float sz = sqrt(max(0.0, kSphereRadius * kSphereRadius - s2));
+        vec3 P1 = kSphereCenter + sx * uAxis + sy * vAxis + sz * L;
+        vec3 N1 = (P1 - kSphereCenter) / kSphereRadius;
+
+        float cosTheta1 = clamp(-dot(lightDir, N1), 0.0, 1.0);
+        float rayWeight = (4.0 * kSphereRadius * kSphereRadius / float(1024 * 1024)) * uniforms.sunIntensity;
+
+        float disp = (uniforms.renderMode == 3u) ? (0.040 * 1.5) : 0.025;
+        vec3 iors = vec3(1.62 - disp, 1.62, 1.62 + disp);
+
+        for (uint ch = 0u; ch < 3u; ch++) {
+            float eta = iors[ch];
+
+            float sin2Theta2 = (1.0 - cosTheta1 * cosTheta1) / (eta * eta);
+            if (sin2Theta2 >= 1.0) continue;
+            float cosTheta2 = sqrt(1.0 - sin2Theta2);
+
+            vec3 D1 = (lightDir / eta) + (cosTheta1 / eta - cosTheta2) * N1;
+            float T_entry = 1.0 - dielectricFresnel(cosTheta1, 1.0, eta);
+
+            float internalDist = 2.0 * kSphereRadius * cosTheta2;
+            vec3 P2 = P1 + D1 * internalDist;
+            vec3 N2 = (P2 - kSphereCenter) / kSphereRadius;
+
+            float absorption = exp(-0.02 * internalDist);
+
+            float cosTheta3 = clamp(dot(D1, N2), 0.0, 1.0);
+            float sin2Theta4 = (1.0 - cosTheta3 * cosTheta3) * (eta * eta);
+            if (sin2Theta4 >= 1.0) continue;
+            float cosTheta4 = sqrt(1.0 - sin2Theta4);
+
+            vec3 D2 = eta * D1 - (eta * cosTheta3 - cosTheta4) * N2;
+            float T_exit = 1.0 - dielectricFresnel(cosTheta3, eta, 1.0);
+
+            float flux = rayWeight * T_entry * T_exit * absorption * uniforms.sunColor[ch];
+
+            if (D2.y < -1e-4) {
+                float tFloor = -P2.y / D2.y;
+                if (tFloor > 0.0) {
+                    vec3 hitFloor = P2 + D2 * tFloor;
+                    if (hitFloor.x >= kFloorMinX && hitFloor.x <= kFloorMaxX &&
+                        hitFloor.z >= kFloorMinZ && hitFloor.z <= kFloorMaxZ) {
+                        splatBilinear(hitFloor.x, hitFloor.z, flux, ch);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    if (quadrant == 1u) {
+        if (uniforms.numTeapotNodes == 0u) return;
+        float objRadius = 0.48;
+        float sx = (uv.x - 0.5) * (2.0 * objRadius);
+        float sy = (uv.y - 0.5) * (2.0 * objRadius);
+        if (sx * sx + sy * sy > objRadius * objRadius) return;
+
+        vec3 rayOrigin = vec3(0.0, 0.30, 0.0) + sx * uAxis + sy * vAxis - lightDir * 3.5;
+        Ray photonRay;
+        photonRay.origin = rayOrigin;
+        photonRay.direction = lightDir;
+
+        float tEntry;
+        vec3 nEntry;
+        if (!intersectTeapotBVH(photonRay, uniforms.numTeapotNodes, tEntry, nEntry)) return;
+
+        vec3 P1 = photonRay.origin + photonRay.direction * tEntry;
+        vec3 N1 = nEntry;
+        float cosTheta1 = clamp(-dot(lightDir, N1), 0.0, 1.0);
+
+        float rayWeight = (4.0 * objRadius * objRadius / float(1024 * 1024)) * uniforms.sunIntensity;
+
+        float objIor = 1.52;
+        vec3 D1;
+        if (!refractRay(lightDir, N1, 1.0 / objIor, D1)) return;
+        float T_entry = 1.0 - dielectricFresnel(cosTheta1, 1.0, objIor);
+
+        Ray insideRay;
+        insideRay.origin = P1 + D1 * 0.005;
+        insideRay.direction = D1;
+
+        float tExit;
+        vec3 nExit;
+        if (!intersectTeapotBVH(insideRay, uniforms.numTeapotNodes, tExit, nExit)) return;
+        if (tExit < 0.002) return;
+
+        float internalDist = tExit;
+        vec3 P2 = insideRay.origin + insideRay.direction * tExit;
+        vec3 N2 = -nExit;
+        float cosTheta3 = clamp(dot(D1, N2), 0.0, 1.0);
+        float T_exit = 1.0 - dielectricFresnel(cosTheta3, objIor, 1.0);
+
+        vec3 absorption = beerLambertAbsorption(vec3(0.05), internalDist);
+        vec3 baseFlux = rayWeight * T_entry * T_exit * absorption * uniforms.sunColor;
+
+        float disp = (uniforms.renderMode == 3u) ? (0.025 * 1.5) : 0.0;
+        vec3 iors = vec3(objIor - disp, objIor, objIor + disp);
+
+        for (uint ch = 0u; ch < 3u; ch++) {
+            float eta = iors[ch];
+            float sin2Theta4 = (1.0 - cosTheta3 * cosTheta3) * (eta * eta);
+            if (sin2Theta4 >= 1.0) continue;
+            float cosTheta4 = sqrt(1.0 - sin2Theta4);
+            vec3 D2 = eta * D1 - (eta * cosTheta3 - cosTheta4) * N2;
+
+            if (D2.y < -1e-4) {
+                float tFloor = -P2.y / D2.y;
+                if (tFloor > 0.0) {
+                    vec3 hitFloor = P2 + D2 * tFloor;
+                    if (hitFloor.x >= kFloorMinX && hitFloor.x <= kFloorMaxX &&
+                        hitFloor.z >= kFloorMinZ && hitFloor.z <= kFloorMaxZ) {
+                        splatBilinear(hitFloor.x, hitFloor.z, baseFlux[ch], ch);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    if (quadrant == 2u) {
+        float objRadius = kCylinderRadius * 1.15;
+        float sx = (uv.x - 0.5) * (2.0 * objRadius);
+        float sy = (uv.y - 0.5) * (2.0 * objRadius);
+        if (sx * sx + sy * sy > objRadius * objRadius) return;
+
+        vec3 cylCenter = kCylinderCenter + vec3(0.0, kCylinderHeight * 0.5, 0.0);
+        vec3 rayOrigin = cylCenter + sx * uAxis + sy * vAxis - lightDir * 3.5;
+        Ray photonRay;
+        photonRay.origin = rayOrigin;
+        photonRay.direction = lightDir;
+
+        float tEntry;
+        vec3 nEntry;
+        if (!intersectCylinder(photonRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, tEntry, nEntry)) return;
+
+        vec3 P1 = photonRay.origin + photonRay.direction * tEntry;
+        vec3 N1 = nEntry;
+        float cosTheta1 = clamp(-dot(lightDir, N1), 0.0, 1.0);
+
+        float rayWeight = (4.0 * objRadius * objRadius / float(1024 * 1024)) * uniforms.sunIntensity;
+
+        float objIor = 1.50;
+        vec3 D1;
+        if (!refractRay(lightDir, N1, 1.0 / objIor, D1)) return;
+        float T_entry = 1.0 - dielectricFresnel(cosTheta1, 1.0, objIor);
+
+        Ray insideRay;
+        insideRay.origin = P1 + D1 * 0.005;
+        insideRay.direction = D1;
+
+        float tExit;
+        vec3 nExit;
+        if (!intersectCylinder(insideRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, tExit, nExit)) return;
+        if (tExit < 0.002) return;
+
+        float internalDist = tExit;
+        vec3 P2 = insideRay.origin + insideRay.direction * tExit;
+        vec3 N2 = -nExit;
+        float cosTheta3 = clamp(dot(D1, N2), 0.0, 1.0);
+        float T_exit = 1.0 - dielectricFresnel(cosTheta3, objIor, 1.0);
+
+        vec3 absorption = beerLambertAbsorption(vec3(1.2, 0.15, 0.9) * 2.2, internalDist);
+        vec3 baseFlux = rayWeight * T_entry * T_exit * absorption * uniforms.sunColor;
+
+        float sin2Theta4 = (1.0 - cosTheta3 * cosTheta3) * (objIor * objIor);
+        if (sin2Theta4 >= 1.0) return;
+        float cosTheta4 = sqrt(1.0 - sin2Theta4);
+        vec3 D2 = objIor * D1 - (objIor * cosTheta3 - cosTheta4) * N2;
+
+        if (D2.y < -1e-4) {
+            float tFloor = -P2.y / D2.y;
+            if (tFloor > 0.0) {
+                vec3 hitFloor = P2 + D2 * tFloor;
+                if (hitFloor.x >= kFloorMinX && hitFloor.x <= kFloorMaxX &&
+                    hitFloor.z >= kFloorMinZ && hitFloor.z <= kFloorMaxZ) {
+                    for (uint ch = 0u; ch < 3u; ch++) {
+                        splatBilinear(hitFloor.x, hitFloor.z, baseFlux[ch], ch);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    {
+        float objRadius = kPrismSide * 0.75;
+        float sx = (uv.x - 0.5) * (2.0 * objRadius);
+        float sy = (uv.y - 0.5) * (2.0 * objRadius);
+        if (sx * sx + sy * sy > objRadius * objRadius) return;
+
+        vec3 prismCenter = kPrismCenter + vec3(0.0, kPrismHeight * 0.5, 0.0);
+        vec3 rayOrigin = prismCenter + sx * uAxis + sy * vAxis - lightDir * 3.5;
+        Ray photonRay;
+        photonRay.origin = rayOrigin;
+        photonRay.direction = lightDir;
+
+        float tEntry;
+        vec3 nEntry;
+        if (!intersectTriangularPrism(photonRay, kPrismCenter, kPrismSide, kPrismHeight, tEntry, nEntry)) return;
+
+        vec3 P1 = photonRay.origin + photonRay.direction * tEntry;
+        vec3 N1 = nEntry;
+        float cosTheta1 = clamp(-dot(lightDir, N1), 0.0, 1.0);
+
+        float rayWeight = (4.0 * objRadius * objRadius / float(1024 * 1024)) * uniforms.sunIntensity;
+
+        float baseIor = 1.58;
+        float prismDisp = 0.055;
+        vec3 iors = vec3(baseIor - prismDisp, baseIor, baseIor + prismDisp);
+
+        for (uint ch = 0u; ch < 3u; ch++) {
+            float eta = iors[ch];
+            vec3 D1;
+            if (!refractRay(lightDir, N1, 1.0 / eta, D1)) continue;
+            float T_entry = 1.0 - dielectricFresnel(cosTheta1, 1.0, eta);
+
+            Ray insideRay;
+            insideRay.origin = P1 + D1 * 0.005;
+            insideRay.direction = D1;
+
+            float tExit;
+            vec3 nExit;
+            if (!intersectTriangularPrism(insideRay, kPrismCenter, kPrismSide, kPrismHeight, tExit, nExit)) continue;
+            if (tExit < 0.002) continue;
+
+            vec3 P2 = insideRay.origin + insideRay.direction * tExit;
+            vec3 N2 = -nExit;
+            float cosTheta3 = clamp(dot(D1, N2), 0.0, 1.0);
+
+            float sin2Theta4 = (1.0 - cosTheta3 * cosTheta3) * (eta * eta);
+            if (sin2Theta4 >= 1.0) continue;
+            float cosTheta4 = sqrt(1.0 - sin2Theta4);
+            vec3 D2 = eta * D1 - (eta * cosTheta3 - cosTheta4) * N2;
+            float T_exit = 1.0 - dielectricFresnel(cosTheta3, eta, 1.0);
+
+            float flux = rayWeight * T_entry * T_exit * uniforms.sunColor[ch] * 1.5;
+
+            if (D2.y < -1e-4) {
+                float tFloor = -P2.y / D2.y;
+                if (tFloor > 0.0) {
+                    vec3 hitFloor = P2 + D2 * tFloor;
+                    if (hitFloor.x >= kFloorMinX && hitFloor.x <= kFloorMaxX &&
+                        hitFloor.z >= kFloorMinZ && hitFloor.z <= kFloorMaxZ) {
+                        splatBilinear(hitFloor.x, hitFloor.z, flux, ch);
+                    }
+                }
+            }
+        }
+    }
+}

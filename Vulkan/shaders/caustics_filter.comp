@@ -1,0 +1,61 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "../../common/scene_rt.glsl"
+
+layout(std140, set = 0, binding = 0) uniform UniformBuffer {
+    GlassUniformsData uniforms;
+};
+
+layout(std430, set = 0, binding = 3) readonly buffer CausticBuffer {
+    uint causticData[];
+};
+
+layout(set = 0, binding = 6, rgba32f) writeonly uniform image2D causticTexture;
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    if (tid.x >= kCausticRes || tid.y >= kCausticRes) return;
+
+    float pixelArea = ((kFloorMaxX - kFloorMinX) / float(kCausticRes)) *
+                      ((kFloorMaxZ - kFloorMinZ) / float(kCausticRes));
+    float invFixedPoint = 1.0 / (1000000000.0 * pixelArea);
+
+    if (uniforms.renderMode != 2u) {
+        uint baseIdx = (tid.y * kCausticRes + tid.x) * 4u;
+        float r = float(causticData[baseIdx + 0u]) * invFixedPoint;
+        float g = float(causticData[baseIdx + 1u]) * invFixedPoint;
+        float b = float(causticData[baseIdx + 2u]) * invFixedPoint;
+        imageStore(causticTexture, ivec2(tid), vec4(r, g, b, 1.0));
+    } else {
+        int filterRadius = int(uniforms.glassRoughness * 18.0 + 2.0);
+        float filterWeightSum = 0.0;
+        vec3 accumIrradiance = vec3(0.0);
+
+        float sigma = float(filterRadius) * 0.5;
+        float twoSigma2 = 2.0 * sigma * sigma;
+
+        for (int dy = -filterRadius; dy <= filterRadius; dy++) {
+            int y = clamp(int(tid.y) + dy, 0, int(kCausticRes) - 1);
+            for (int dx = -filterRadius; dx <= filterRadius; dx++) {
+                int x = clamp(int(tid.x) + dx, 0, int(kCausticRes) - 1);
+
+                float dist2 = float(dx * dx + dy * dy);
+                float weight = exp(-dist2 / twoSigma2);
+
+                uint baseIdx = (uint(y) * kCausticRes + uint(x)) * 4u;
+                float r = float(causticData[baseIdx + 0u]) * invFixedPoint;
+                float g = float(causticData[baseIdx + 1u]) * invFixedPoint;
+                float b = float(causticData[baseIdx + 2u]) * invFixedPoint;
+
+                accumIrradiance += vec3(r, g, b) * weight;
+                filterWeightSum += weight;
+            }
+        }
+
+        vec3 finalCaustic = accumIrradiance / max(1e-5, filterWeightSum);
+        imageStore(causticTexture, ivec2(tid), vec4(finalCaustic, 1.0));
+    }
+}
