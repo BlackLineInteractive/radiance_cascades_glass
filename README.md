@@ -1,4 +1,4 @@
-# Radiance Cascades Glass & Caustics Engine
+# Radiance Cascades Glass & Caustics
 
 A high-performance, multi-backend real-time ray tracing engine demonstrating **Radiance Cascades for Dielectrics**, **Spectral Cauchy Dispersion**, and **Atomic GPU Caustics**. Built with native implementations in **Apple Metal**, **Vulkan 1.2+**, and **OpenGL 4.3+ Core**.
 
@@ -21,6 +21,7 @@ A high-performance, multi-backend real-time ray tracing engine demonstrating **R
 ## Attribution & Credits
 
 The **Radiance Cascades** algorithm was conceived and pioneered by **Alexander Sannikov**, who introduced the concept in his 2023/2024 research:
+
 - **Alexander Sannikov** - *"Radiance Cascades: A Novel Approach to Calculating Global Illumination"* (2023/2024).
 - Repository: [https://github.com/Raikiri/RadianceCascadesPaper](https://github.com/Raikiri/RadianceCascadesPaper)
 - Direct PDF: [RadianceCascades.pdf](https://github.com/Raikiri/RadianceCascadesPaper/blob/main/out_latexmk2/RadianceCascades.pdf)
@@ -45,6 +46,7 @@ Created and maintained by **Blackline Interactive**:
 Traditional real-time ray tracing struggles with complex dielectric phenomena (such as multi-interface refraction, chromatic dispersion, rough transmission for frosted glass, and focused photon caustics) due to high sampling noise and prohibitive computational cost.
 
 This engine unifies:
+
 1. **3D Radiance Cascades Global Illumination**: Hierarchical 4-cascade angular-spatial radiance representation with bounded distance intervals and far-to-near merging across surfaces for smooth indirect bounce lighting and color bleeding. *(Note: RC is utilized here to calculate diffuse irradiance, which is then integrated with complex dielectric phenomena like specular refraction and rough transmission).*
 2. **Multi-Wavelength Cauchy Dispersion**: Spectral splitting ($R, G, B$) through Newton's prism and crystal spheres using Cauchy's dispersion equation:
    $$n(\lambda) = n_0 + \frac{B}{\lambda^2}$$
@@ -58,12 +60,12 @@ This engine unifies:
 ## Visual Gallery
 
 | Mode 1: Clear Glass & Floor Caustics | Mode 2: Frosted / Rough Glass |
-|:---:|:---:|
+| :---: | :---: |
 | ![Realistic](media/1_Realistic_Glass_Cascade_GI.png) | ![Frosted](media/2_Frosted_Glass.png) |
 | *Snell refraction, Cauchy dispersion, floor photon caustics* | *Cone-jittered transmission & diffused caustic filter* |
 
 | Mode 3: Newton Prism Dispersion | Mode 0: Whitted RT Baseline |
-|:---:|:---:|
+| :---: | :---: |
 | ![Dispersion](media/3_Spectral_Dispersion.png) | ![Whitted Baseline](media/4_Whitted_Baseline.png) |
 | *Amplified spectral separation on prism & crystal sphere* | *Classical binary shadow ray (zero caustics, dark shadow)* |
 
@@ -72,7 +74,7 @@ This engine unifies:
 ## Optical Modes
 
 | Mode | Identifier | Description |
-|:---:|:---|:---|
+| :---: | :--- | :--- |
 | **Mode 1** | **Realistic Glass + Caustics** | Snell refraction, Fresnel reflection, Cauchy spectral dispersion, floor caustics splatting, and radiance cascade GI. |
 | **Mode 2** | **Frosted / Rough Glass** | Micro-roughness transmission cone sampling, softened refraction, and Gaussian-diffused caustic footprints. |
 | **Mode 3** | **High Spectral Dispersion** | Exaggerated Cauchy coefficients on crystal spheres and Newton's triangular prism, displaying distinct spectral separation. |
@@ -116,7 +118,7 @@ radiance_cascades_glass/
 ### Backend Comparison
 
 | Feature | Apple Metal | Vulkan 1.2+ | OpenGL 4.3+ Core |
-|:---|:---:|:---:|:---:|
+| :--- | :---: | :---: | :---: |
 | **Language** | MSL (C++14 based) | GLSL $\to$ SPIR-V | GLSL 430 / 450 |
 | **Compute Passes** | 5 Pipelines | 5 Pipelines | 5 Programs |
 | **Memory Barriers** | Implicit / Metal Fences | Explicit `VkMemoryBarrier` | `glMemoryBarrier` |
@@ -131,18 +133,21 @@ radiance_cascades_glass/
 ### Prerequisites
 
 #### macOS
+
 ```bash
 # Install Homebrew dependencies
 brew install cmake glfw glm vulkan-headers vulkan-loader molten-vk glslang
 ```
 
 #### Ubuntu / Debian Linux
+
 ```bash
 sudo apt update
 sudo apt install -y cmake g++ libvulkan-dev vulkan-tools libglfw3-dev libglm-dev glslang-tools
 ```
 
 #### Windows
+
 Install the [Vulkan SDK](https://vulkan.lunarg.com/), [CMake](https://cmake.org/), and install `glfw` and `glm` via [vcpkg](https://github.com/microsoft/vcpkg).
 
 ---
@@ -157,6 +162,7 @@ cmake --build build -j
 ```
 
 This automatically detects available SDKs and compiles:
+
 - `build/rc_glass_app` (Metal on macOS)
 - `build/Vulkan/rc_glass_vk` (Vulkan)
 - `build/OpenGL/rc_glass_gl` (OpenGL 4.3+)
@@ -183,7 +189,7 @@ cd OpenGL && ./build.sh && ./rc_glass_gl
 ## Interactive Controls
 
 | Control | Action |
-|:---|:---|
+| :--- | :--- |
 | **Left Click + Drag** | Orbit camera around target |
 | **Option + Drag** | Pan camera horizontally & vertically |
 | **Right Click + Drag / Scroll** | Zoom camera in / out |
@@ -216,6 +222,7 @@ All backends support automated headless execution for profiling, CI/CD validatio
 ```
 
 ### CLI Arguments
+
 - `--headless` or `--benchmark`: Runs all 4 optical modes sequentially, records microsecond-accurate frametimes, logs FPS, and outputs PNG renders into `output/`.
 - `--teapot <path>`: Specifies custom path to `teapot.bin` mesh data.
 - `--shader <path>`: (Metal only) Specifies custom compiled `.metallib` path.
@@ -225,28 +232,33 @@ All backends support automated headless execution for profiling, CI/CD validatio
 ## Mathematical Formulations
 
 ### 1. Dielectric Fresnel Equations
+
 For unpolarized light with incident angle $\theta_i$ and transmitted angle $\theta_t$:
 $$R_s = \left|\frac{n_1 \cos\theta_i - n_2 \cos\theta_t}{n_1 \cos\theta_i + n_2 \cos\theta_t}\right|^2, \quad R_p = \left|\frac{n_1 \cos\theta_t - n_2 \cos\theta_i}{n_1 \cos\theta_t + n_2 \cos\theta_i}\right|^2$$
 $$F(\theta_i) = \frac{1}{2} (R_s + R_p)$$
 
 ### 2. Snell-Descartes Refraction Vector
+
 Given incident unit direction $\mathbf{I}$, surface normal $\mathbf{N}$, and relative index $\eta = n_1 / n_2$:
 $$\cos\theta_i = -\mathbf{N} \cdot \mathbf{I}, \quad \sin^2\theta_t = \eta^2 (1 - \cos^2\theta_i)$$
 $$\mathbf{T} = \eta \mathbf{I} + (\eta \cos\theta_i - \sqrt{1 - \sin^2\theta_t}) \mathbf{N}$$
 If $\sin^2\theta_t > 1$, Total Internal Reflection (TIR) occurs.
 
 ### 3. Bilinear Photon Splatting
+
 Photons intersecting the receiver plane $(x, z)$ distribute energy to surrounding grid cells $(x_0, z_0), (x_1, z_0), (x_0, z_1), (x_1, z_1)$ with bilinear weights:
 $$w_{00} = (1 - f_x)(1 - f_z), \quad w_{10} = f_x (1 - f_z), \quad w_{01} = (1 - f_x) f_z, \quad w_{11} = f_x f_z$$
 Accumulated into integer SSBO buffers via fixed-point scaling factor $S = 10^9$:
 $$\Delta I = \lfloor \Phi \cdot w_{uv} \cdot S \rfloor$$
 
 ### 4. 3D Radiance Cascades Formulation
+
 Following Alexander Sannikov's Radiance Cascades framework, indirect radiance is evaluated across a 4-level hierarchy ($C = 4$) with bounded geometric range intervals:
 
 $$I_c = [r_c, r_{c+1}], \quad \mathbf{r} = \{0.005\,\text{m},\, 0.25\,\text{m},\, 0.80\,\text{m},\, 2.50\,\text{m},\, 100.0\,\text{m}\}$$
 
 Each cascade balances spatial probe density and angular ray resolution ($M_c \in \{16, 32, 64, 128\}$):
+
 - **Interval-Bounded Ray Tracing**: Rays for cascade $c$ are traced exclusively within distance interval $[r_c, r_{c+1}]$, drastically pruning BVH traversal and primitive intersections.
 - **Hierarchical Far-to-Near Merging**: Radiance is merged backwards from Cascade 3 down to Cascade 0:
   $$L_c(\vec{\omega}) = L_c^{\text{local}}(\vec{\omega}) + \tau_c(\vec{\omega}) \cdot L_{c+1}^{\text{merged}}(\vec{\omega})$$
@@ -260,4 +272,3 @@ Each cascade balances spatial probe density and angular ray resolution ($M_c \in
 
 This project is open-source software licensed under the **[MIT License](LICENSE)**. See the [LICENSE](LICENSE) file for details.
 Copyright (c) 2026 Blackline Interactive.
-
