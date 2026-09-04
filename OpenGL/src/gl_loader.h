@@ -33,9 +33,11 @@ typedef ptrdiff_t GLsizeiptr;
 #define GL_FLOAT 0x1406
 #define GL_RGBA 0x1908
 #define GL_TRIANGLES 0x0004
+#define GL_NEAREST 0x2600
 #define GL_LINEAR 0x2601
 #define GL_CLAMP_TO_EDGE 0x812F
 #define GL_TEXTURE_2D 0x0DE1
+#define GL_TEXTURE_2D_ARRAY 0x8C1A
 #define GL_TEXTURE_MIN_FILTER 0x2801
 #define GL_TEXTURE_MAG_FILTER 0x2800
 #define GL_TEXTURE_WRAP_S 0x2802
@@ -132,6 +134,7 @@ typedef void (*PFNGLDRAWARRAYSPROC)(GLenum mode, GLint first, GLsizei count);
 typedef void (*PFNGLGENTEXTURESPROC)(GLsizei n, GLuint *textures);
 typedef void (*PFNGLBINDTEXTUREPROC)(GLenum target, GLuint texture);
 typedef void (*PFNGLTEXSTORAGE2DPROC)(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height);
+typedef void (*PFNGLTEXSTORAGE3DPROC)(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth);
 typedef void (*PFNGLTEXIMAGE2DPROC)(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void *pixels);
 typedef void (*PFNGLTEXPARAMETERIPROC)(GLenum target, GLenum pname, GLint param);
 typedef void (*PFNGLACTIVETEXTUREPROC)(GLenum texture);
@@ -175,6 +178,7 @@ extern PFNGLDRAWARRAYSPROC glDrawArrays;
 extern PFNGLGENTEXTURESPROC glGenTextures;
 extern PFNGLBINDTEXTUREPROC glBindTexture;
 extern PFNGLTEXSTORAGE2DPROC glTexStorage2D;
+extern PFNGLTEXSTORAGE3DPROC glTexStorage3D;
 extern PFNGLTEXIMAGE2DPROC glTexImage2D;
 extern PFNGLTEXPARAMETERIPROC glTexParameteri;
 extern PFNGLACTIVETEXTUREPROC glActiveTexture;

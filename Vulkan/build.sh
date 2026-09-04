@@ -8,7 +8,11 @@ echo "=== Building Vulkan 1.2+ Radiance Cascades Glass Engine ==="
 
 # 1. Compile GLSL compute shaders to SPIR-V
 echo "[1/2] Compiling Vulkan GLSL compute shaders to SPIR-V..."
-glslangValidator -V "$ROOT_DIR/Vulkan/shaders/radiance_cascades.comp" -o "$ROOT_DIR/Vulkan/shaders/radiance_cascades.spv"
+glslangValidator -V "$ROOT_DIR/Vulkan/shaders/cascade_gather0.comp" -o "$ROOT_DIR/Vulkan/shaders/cascade_gather0.spv"
+glslangValidator -V "$ROOT_DIR/Vulkan/shaders/cascade_gather1.comp" -o "$ROOT_DIR/Vulkan/shaders/cascade_gather1.spv"
+glslangValidator -V "$ROOT_DIR/Vulkan/shaders/cascade_gather2.comp" -o "$ROOT_DIR/Vulkan/shaders/cascade_gather2.spv"
+glslangValidator -V "$ROOT_DIR/Vulkan/shaders/cascade_gather3.comp" -o "$ROOT_DIR/Vulkan/shaders/cascade_gather3.spv"
+glslangValidator -V "$ROOT_DIR/Vulkan/shaders/cascade_integrate.comp" -o "$ROOT_DIR/Vulkan/shaders/cascade_integrate.spv"
 glslangValidator -V "$ROOT_DIR/Vulkan/shaders/filter_atlas.comp" -o "$ROOT_DIR/Vulkan/shaders/filter_atlas.spv"
 glslangValidator -V "$ROOT_DIR/Vulkan/shaders/caustics_generate.comp" -o "$ROOT_DIR/Vulkan/shaders/caustics_generate.spv"
 glslangValidator -V "$ROOT_DIR/Vulkan/shaders/caustics_filter.comp" -o "$ROOT_DIR/Vulkan/shaders/caustics_filter.spv"

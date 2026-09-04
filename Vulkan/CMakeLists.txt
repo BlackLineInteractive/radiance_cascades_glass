@@ -12,7 +12,11 @@ find_package(glm REQUIRED)
 find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
 
 set(SHADERS
-    radiance_cascades.comp
+    cascade_gather0.comp
+    cascade_gather1.comp
+    cascade_gather2.comp
+    cascade_gather3.comp
+    cascade_integrate.comp
     filter_atlas.comp
     caustics_generate.comp
     caustics_filter.comp

@@ -174,7 +174,8 @@ static GLuint compileComputeShader(const std::string &shaderPath) {
 struct OpenGLRenderer {
     GLFWwindow *window = nullptr;
 
-    GLuint cascadeProgram = 0;
+    GLuint cascadeGatherProgram[4] = {}; // index by cascade level 0..3
+    GLuint cascadeIntegrateProgram = 0;
     GLuint filterAtlasProgram = 0;
     GLuint causticsGenProgram = 0;
     GLuint causticsFilterProgram = 0;
@@ -183,6 +184,7 @@ struct OpenGLRenderer {
 
     GLuint irradianceAtlas = 0;
     GLuint filteredIrradianceAtlas = 0;
+    GLuint cascadeTex[4] = {}; // one per cascade level, 5 array layers (room surfaces) each
     GLuint causticTexture = 0;
     GLuint outTexture = 0;
 
@@ -223,6 +225,21 @@ static GLuint createStorageTexture(uint32_t w, uint32_t h) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    return tex;
+}
+
+// A cascade level's probe grid: 5 array layers, one per room surface, each
+// probesPerAxis x probesPerAxis probes with `rays` directions packed per
+// probe along X.
+static GLuint createStorageTextureArray(uint32_t w, uint32_t h, uint32_t layers) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA32F, w, h, layers);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     return tex;
 }
 
@@ -295,19 +312,24 @@ bool initOpenGL(OpenGLRenderer &r, const std::string &teapotBinPath, bool headle
     std::cout << "[OpenGL] Driver: " << glGetString(GL_RENDERER) << " (" << glGetString(GL_VERSION) << ")\n";
 
     std::string shaderDir = resolveExistingPath({
-        "OpenGL/shaders/radiance_cascades.comp",
-        "shaders/radiance_cascades.comp"
+        "OpenGL/shaders/filter_atlas.comp",
+        "shaders/filter_atlas.comp"
     });
     std::string baseDir = shaderDir.substr(0, shaderDir.find_last_of("/\\") + 1);
 
-    r.cascadeProgram        = compileComputeShader(baseDir + "radiance_cascades.comp");
-    r.filterAtlasProgram    = compileComputeShader(baseDir + "filter_atlas.comp");
-    r.causticsGenProgram    = compileComputeShader(baseDir + "caustics_generate.comp");
-    r.causticsFilterProgram = compileComputeShader(baseDir + "caustics_filter.comp");
-    r.sceneProgram          = compileComputeShader(baseDir + "render_scene.comp");
-    r.quadProgram           = compileQuadProgram();
+    r.cascadeGatherProgram[0] = compileComputeShader(baseDir + "cascade_gather0.comp");
+    r.cascadeGatherProgram[1] = compileComputeShader(baseDir + "cascade_gather1.comp");
+    r.cascadeGatherProgram[2] = compileComputeShader(baseDir + "cascade_gather2.comp");
+    r.cascadeGatherProgram[3] = compileComputeShader(baseDir + "cascade_gather3.comp");
+    r.cascadeIntegrateProgram = compileComputeShader(baseDir + "cascade_integrate.comp");
+    r.filterAtlasProgram      = compileComputeShader(baseDir + "filter_atlas.comp");
+    r.causticsGenProgram      = compileComputeShader(baseDir + "caustics_generate.comp");
+    r.causticsFilterProgram   = compileComputeShader(baseDir + "caustics_filter.comp");
+    r.sceneProgram            = compileComputeShader(baseDir + "render_scene.comp");
+    r.quadProgram             = compileQuadProgram();
 
-    if (!r.cascadeProgram || !r.filterAtlasProgram || !r.causticsGenProgram || !r.causticsFilterProgram || !r.sceneProgram) {
+    if (!r.cascadeGatherProgram[0] || !r.cascadeGatherProgram[1] || !r.cascadeGatherProgram[2] || !r.cascadeGatherProgram[3] ||
+        !r.cascadeIntegrateProgram || !r.filterAtlasProgram || !r.causticsGenProgram || !r.causticsFilterProgram || !r.sceneProgram) {
         std::cerr << "[OpenGL] Fatal: Failed to compile one or more compute shaders\n";
         return false;
     }
@@ -316,6 +338,19 @@ bool initOpenGL(OpenGLRenderer &r, const std::string &teapotBinPath, bool headle
     r.filteredIrradianceAtlas = createStorageTexture(320, 64);
     r.causticTexture          = createStorageTexture(1024, 1024);
     r.outTexture              = createStorageTexture(r.width, r.height);
+
+    // One array texture per cascade level (5 layers, one per room surface).
+    // Each is fully overwritten by its gather pass every frame, so unlike the
+    // atlas textures above they don't need a startup clear.
+    struct CascadeLevelDims { uint32_t probesPerAxis; uint32_t rays; };
+    static constexpr CascadeLevelDims kCascadeLevelDims[4] = {
+        { 64, 16 }, { 32, 64 }, { 16, 256 }, { 8, 1024 },
+    };
+    for (int level = 0; level < 4; level++) {
+        uint32_t w = kCascadeLevelDims[level].probesPerAxis * kCascadeLevelDims[level].rays;
+        uint32_t h = kCascadeLevelDims[level].probesPerAxis;
+        r.cascadeTex[level] = createStorageTextureArray(w, h, 5);
+    }
 
     glGenBuffers(1, &r.uniformBuffer);
     glBindBuffer(GL_UNIFORM_BUFFER, r.uniformBuffer);
@@ -393,8 +428,29 @@ void renderFrameGL(OpenGLRenderer &r, float deltaTime) {
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(GlassUniformsGL), &uniforms);
 
     if (r.renderMode != 0) {
-        glUseProgram(r.cascadeProgram);
-        glBindImageTexture(4, r.irradianceAtlas, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+        // Far-to-near: level 3 has nothing above it to read, level 0 reads
+        // level 1, and so on down. Each dispatch covers exactly that level's
+        // probe x ray grid, with one z-layer per room surface.
+        struct CascadeLevelDims { uint32_t probesPerAxis; uint32_t rays; };
+        static constexpr CascadeLevelDims kCascadeLevelDims[4] = {
+            { 64, 16 }, { 32, 64 }, { 16, 256 }, { 8, 1024 },
+        };
+        for (int level = 3; level >= 0; level--) {
+            uint32_t levelWidth = kCascadeLevelDims[level].probesPerAxis * kCascadeLevelDims[level].rays;
+            uint32_t probesPerAxis = kCascadeLevelDims[level].probesPerAxis;
+
+            glUseProgram(r.cascadeGatherProgram[level]);
+            glBindImageTexture(10 + level, r.cascadeTex[level], 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+            if (level < 3) {
+                glBindImageTexture(10 + level + 1, r.cascadeTex[level + 1], 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+            }
+            glDispatchCompute((levelWidth + 15) / 16, (probesPerAxis + 15) / 16, 5);
+            glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+        }
+
+        glUseProgram(r.cascadeIntegrateProgram);
+        glBindImageTexture(10, r.cascadeTex[0], 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(4, r.irradianceAtlas, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA32F);
         glDispatchCompute((320 + 15) / 16, (64 + 15) / 16, 1);
         glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
 

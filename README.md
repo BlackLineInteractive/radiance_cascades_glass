@@ -84,7 +84,7 @@ Dispersion uses a Cauchy-style split, $n(\lambda) = n_0 + B/\lambda^2$, collapse
 
 ## Architecture & Backends
 
-The three backends are independent hosts over a shared scene definition and mesh loader. They are not quite feature-identical: the Metal cascade gather traces glass and feeds the previous frame's atlas back in for a second bounce, while the GLSL one skips both and uses a flat ambient term. That is most of the gap in the numbers below, so treat the Vulkan figure as measuring a cheaper gather rather than a faster backend.
+The three backends are independent hosts over a shared scene definition and mesh loader. They are not quite feature-identical: the Metal cascade gather traces glass and feeds the previous frame's atlas back in for a second bounce, while the GLSL one skips both and uses a flat ambient term.
 
 
 
@@ -122,11 +122,11 @@ radiance_cascades_glass/
 | Feature | Apple Metal | Vulkan 1.2+ | OpenGL 4.3+ Core |
 | :--- | :---: | :---: | :---: |
 | **Language** | MSL (C++14 based) | GLSL $\to$ SPIR-V | GLSL 430 / 450 |
-| **Compute Passes** | 5 Pipelines | 5 Pipelines | 5 Programs |
+| **Compute Passes** | 9 Pipelines | 9 Pipelines | 9 Programs |
 | **Memory Barriers** | Implicit / Metal Fences | Explicit `VkMemoryBarrier` | `glMemoryBarrier` |
 | **Shader Storage** | `device const T*` | SSBO (`std430`) | SSBO (`std430`) |
 | **Platform Target** | macOS (Native) | Cross-platform / MoltenVK | Linux / Windows / Mesa |
-| **Measured** | 24 fps clear / 20 fps frosted @1080p | 70 fps clear / 49 fps frosted @720p, via MoltenVK | not benchmarked (macOS caps GL at 4.1, no compute) |
+| **Measured** | 69 fps clear / 47 fps frosted @1080p | 69 fps clear / 47 fps frosted @720p, via MoltenVK | not benchmarked (macOS caps GL at 4.1, no compute) |
 
 ---
 
@@ -255,17 +255,17 @@ $$\Delta I = \lfloor \Phi \cdot w_{uv} \cdot S \rfloor$$
 
 ### 4. Cascaded Irradiance
 
-Four cascades, each owning one segment of the ray:
+Four cascades, each owning one segment of the ray and its own probe grid, stored in its own texture:
 
 $$I_c = [r_c, r_{c+1}], \quad \mathbf{r} = \{0.005,\ 0.25,\ 0.80,\ 2.50,\ 100.0\}\ \text{m}$$
 
-with $M_c \in \{16, 32, 64, 128\}$ directions and probes snapped to a $2^c$-texel grid on the atlas. A cascade-$c$ ray is traced only inside its own interval, so nothing is intersected twice, and the results merge back down:
+Probe density drops 4x in area per level up ($64^2, 32^2, 16^2, 8^2$ per surface), and ray count $M_c$ grows 4x to match ($M_c = 16 \cdot 4^c$, i.e. $16, 64, 256, 1024$), so every level spends the same total ray budget: $\text{probes}^2 \cdot M_c$ is constant across $c$. Each level is a separate compute dispatch, evaluated once, far-to-near - level 3 first (nothing above it, so its residual picks up the sky), then 2, 1, 0, each reading the level above rather than retracing it. A cascade-$c$ ray is traced only inside its own interval, so nothing is intersected twice, and the levels merge:
 
-$$L_c(\vec{\omega}_i) = L_c^{\text{local}}(\vec{\omega}_i) + \tau_c(\vec{\omega}_i) \cdot \tfrac{1}{2}\left(L_{c+1}(\vec{\omega}_{2i}) + L_{c+1}(\vec{\omega}_{2i+1})\right)$$
+$$L_c(\vec{\omega}_i) = L_c^{\text{local}}(\vec{\omega}_i) + \tau_c(\vec{\omega}_i) \cdot \tfrac{1}{4}\sum_{k=0}^{3} \hat{L}_{c+1}(\vec{\omega}_{4i+k})$$
 
-$\tau_c$ is the residual transmittance: 1 when the ray leaves the interval unobstructed, and `smoothstep(0.85, 1, t)` when it hits near the far edge, which stops the interval boundary from showing up as a hard ring. Cascade 3's residual picks up the sky instead of a further cascade.
+$\tau_c$ is the residual transmittance: 1 when the ray leaves the interval unobstructed, and `smoothstep(0.85, 1, t)` when it hits near the far edge, which stops the interval boundary from showing up as a hard ring. $\hat{L}_{c+1}$ is bilinearly interpolated across level $c+1$'s probe grid at the querying probe's position, not read from the single nearest coarse probe - a fine probe generally doesn't sit on a coarse one.
 
-Irradiance is the mean of the merged cascade-0 radiance:
+Irradiance is the mean of cascade 0's merged radiance:
 
 $$E(\mathbf{x}) = \frac{1}{M_0}\sum_{k=0}^{M_0-1} L_0(\vec{\omega}_k)$$
 
@@ -275,15 +275,15 @@ There is no explicit $\cos\theta$ term because the directions are drawn cosine-w
 
 ## What is and isn't Radiance Cascades here
 
-The interval partition and the far-to-near merge come straight from Sannikov's formulation. Three things do not, and calling the result "Radiance Cascades" without qualification would be overselling it:
+The interval partition and the far-to-near merge come straight from Sannikov's formulation. So does the amortization now: each cascade level is its own dispatch, over its own probe grid, evaluated once and read (not retraced) by the level below.
 
-**Cascades are not stored, so nothing is amortised.** In the real scheme, a coarse cascade is computed once at low spatial resolution and then read by every fine probe under it - that is where the speedup comes from. Here the atlas is one thread per texel and each thread walks all four cascades itself. Texels in the same 8x8 block do share cascade 3's *probe position*, but they each re-trace its 128 rays with their own jitter, so the coarse level costs 64x what the structure is supposed to make it cost. In practice it behaves as supersampling, not as a cache.
+**Cascades are stored, one texture per level.** Level 3 (8x8 probes/surface, 1024 rays) is computed once and read by level 2's 16x16 probes, which is read by level 1's 32x32, down to level 0's 64x64. Ray count quadruples per level (16, 64, 256, 1024) to match the 4x drop in probe density, so every level spends the same total ray budget - `probes^2 * rays` is constant across levels, which is the condition the doubling in an earlier version of this engine was missing (it kept spatial resolution's 4x-per-level drop but only doubled the rays, leaving the coarse cascades angularly under-resolved for the solid angle they cover).
 
-**The angular ratio is off by 2x per level.** Spatial resolution drops 4x in area per cascade while the ray count only doubles. Sannikov's penumbra condition wants angular resolution to grow as fast as spatial resolution shrinks; at 2x, the higher cascades are angularly under-resolved for the solid angle they cover.
+**Coarse probes are read with manual bilinear interpolation**, not snapped to the nearest one, since a fine probe rarely sits exactly on a coarse probe's position. GLSL can't express this as hardware texture filtering here because probes and directions share one image axis (bilinear filtering would blend across unrelated directions), so it's four explicit `imageLoad`s averaged by hand.
 
-**No bilinear merge between coarse probes.** Each texel reads a single snapped coarse probe rather than interpolating the four nearest, which is visible as blocking at cascade boundaries on large flat surfaces.
+What this buys in practice: on the reference scene the old per-texel-retrace scheme spent about 4.9M ray-scene intersections a frame; the amortized version spends about 1.3M for the same four intervals at the corrected (4x) angular scaling - roughly 3.75x fewer traces while fixing the angular deficiency the old version had. On this machine (AMD Radeon Pro 5500M) the Metal cascade pass went from ~42ms to ~14.5ms.
 
-There is also a structural limit: probes only exist on the five room surfaces, as a 64x64 lightmap each. So this is a surface irradiance cache with a cascaded gather, not a volumetric or screen-space cascade hierarchy. Glass objects have no probes of their own and read a normal-weighted blend of the five walls.
+There is still a structural limit that this pass doesn't touch: probes only exist on the five room surfaces, as a 64x64 lightmap each. So this is a surface irradiance cache with a cascaded gather, not a volumetric or screen-space cascade hierarchy. Glass objects have no probes of their own and read a normal-weighted blend of the five walls.
 
 ---
 

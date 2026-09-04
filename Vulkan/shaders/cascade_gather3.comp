@@ -1,0 +1,31 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "../../common/scene_rt.glsl"
+
+layout(std140, set = 0, binding = 0) uniform UniformBuffer {
+    GlassUniformsData uniforms;
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer BVHBuffer {
+    GPUBVHNode bvhNodes[];
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer TriBuffer {
+    GPUTriangle triangles[];
+};
+
+#include "../../common/scene_intersect.glsl"
+#include "../../common/cascade_common.glsl"
+
+layout(set = 0, binding = 13, rgba32f) writeonly uniform image2DArray outCascade;
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+#define CASCADE_PROBES_THIS 8u
+#define CASCADE_RAYS_THIS 1024u
+#define CASCADE_TMIN 2.50
+#define CASCADE_TMAX 100.0
+#define CASCADE_SKY_BOOST 1.5
+
+#include "../../common/cascade_gather_main.glsl"

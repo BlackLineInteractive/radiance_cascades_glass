@@ -738,15 +738,6 @@ inline void getSurfaceGeometry(uint surfaceId, float2 uv, thread float3 &pos, th
     }
 }
 
-// Cascade N covers [kCascadeRanges[N], kCascadeRanges[N+1]] along a ray. The
-// intervals do not overlap, so a full hemisphere gather is the sum of the four.
-constant float kCascadeRanges[5] = { 0.005f, 0.25f, 0.80f, 2.50f, 100.0f };
-
-constant int kRaysC0 = 16;
-constant int kRaysC1 = 32;
-constant int kRaysC2 = 64;
-constant int kRaysC3 = 128;
-
 inline float3 sampleSurfaceAtlas(
     uint surfaceId,
     float u,
@@ -813,6 +804,70 @@ inline float3 sampleIrradianceAtlas(
     return (wFloor * irrFloor + wCeil * irrCeil + wBack * irrBack + wLeft * irrLeft + wRight * irrRight) / wSum;
 }
 
+struct CascadeLevelParams {
+    float tMin;
+    float tMax;
+    uint raysThisLevel;
+    uint raysUpperLevel;          // 0 marks the terminal (farthest) cascade: nothing to merge from.
+    uint probesPerAxisThisLevel;
+    uint probesPerAxisUpperLevel; // unused when raysUpperLevel == 0
+    float skyBoost;
+};
+
+// Cosine-weighted Fibonacci direction `index` out of `count`, in the probe's
+// tangent frame. Level N+1 has 4x the directions of level N (see
+// cascadeGatherKernel), so index i here corresponds to [4i, 4i+3] one level up.
+inline float3 cascadeDirection(Basis tbn, int index, int count, float jitter) {
+    float cosTheta = sqrt(max(0.0f, 1.0f - (float(index) + 0.5f) / float(count)));
+    float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+    float phi = float(index) * 2.399963229728f + jitter;
+    return tbn.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+}
+
+// A cascade's probes sit at the centre of a probesPerAxis x probesPerAxis grid
+// over the surface, one probe per thread row rather than one per atlas texel.
+inline void cascadeProbeAt(uint surfaceId, uint probeX, uint probeY, uint probesPerAxis,
+                           thread float3 &origin, thread Basis &tbn, thread float2 &uv) {
+    uv = (float2(probeX, probeY) + 0.5f) / float(probesPerAxis);
+    float3 pos, nor;
+    getSurfaceGeometry(surfaceId, uv, pos, nor);
+    tbn = makeTBN(nor);
+    origin = pos + nor * 0.004f;
+}
+
+// Manual bilinear fetch across a coarser cascade's probe grid, at a fixed
+// direction index. Hardware texture filtering can't be used here because
+// probes and directions are packed along the same texture axis, and blending
+// across a direction boundary would mix unrelated rays.
+inline float3 sampleCascadeBilinear(
+    texture2d_array<float, access::read> cascade,
+    uint surfaceId,
+    float2 uv,
+    uint probesPerAxis,
+    uint rays,
+    uint dirIndex
+) {
+    float gx = uv.x * float(probesPerAxis) - 0.5f;
+    float gy = uv.y * float(probesPerAxis) - 0.5f;
+    int x0 = int(floor(gx));
+    int y0 = int(floor(gy));
+    float fx = gx - float(x0);
+    float fy = gy - float(y0);
+
+    int maxIdx = int(probesPerAxis) - 1;
+    int x1 = clamp(x0 + 1, 0, maxIdx);
+    int y1 = clamp(y0 + 1, 0, maxIdx);
+    x0 = clamp(x0, 0, maxIdx);
+    y0 = clamp(y0, 0, maxIdx);
+
+    float3 c00 = cascade.read(uint2(uint(x0) * rays + dirIndex, uint(y0)), surfaceId).rgb;
+    float3 c10 = cascade.read(uint2(uint(x1) * rays + dirIndex, uint(y0)), surfaceId).rgb;
+    float3 c01 = cascade.read(uint2(uint(x0) * rays + dirIndex, uint(y1)), surfaceId).rgb;
+    float3 c11 = cascade.read(uint2(uint(x1) * rays + dirIndex, uint(y1)), surfaceId).rgb;
+
+    return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+}
+
 // Traces ray strictly within distance interval [tMin, tMax] with temporal multi-bounce
 inline float4 traceCascadeInterval(
     float3 origin,
@@ -853,113 +908,87 @@ inline float4 traceCascadeInterval(
     return float4(0.0f, 0.0f, 0.0f, 1.0f);
 }
 
-// Cosine-weighted Fibonacci direction `index` out of `count`, in the probe's
-// tangent frame. Cascade N+1 uses 2*count, so index 2i and 2i+1 are the two
-// directions that merge back into index i one level down.
-inline float3 cascadeDirection(Basis tbn, int index, int count, float jitter) {
-    float cosTheta = sqrt(max(0.0f, 1.0f - (float(index) + 0.5f) / float(count)));
-    float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
-    float phi = float(index) * 2.399963229728f + jitter;
-    return tbn.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+// One thread per (probe, direction) at this cascade level, dispatched once
+// per level, far-to-near (3, 2, 1, 0). Each level traces its own probe grid
+// exactly once and reads the level above through sampleCascadeBilinear rather
+// than retracing it, so a coarse cascade costs what its own probe count and
+// ray count say it costs, not what the finest level below it costs.
+kernel void cascadeGatherKernel(
+    uint3 tid [[thread_position_in_grid]],
+    texture2d_array<float, access::write> outCascade [[texture(0)]],
+    texture2d_array<float, access::read> upperCascade [[texture(1)]],
+    texture2d<float, access::sample> prevAtlas [[texture(2)]],
+    constant GlassUniforms &uniforms [[buffer(0)]],
+    constant CascadeLevelParams &level [[buffer(1)]],
+    device const GPUBVHNode *bvhNodes [[buffer(2)]],
+    device const GPUTriangle *triangles [[buffer(3)]]
+) {
+    uint perSurfaceWidth = level.probesPerAxisThisLevel * level.raysThisLevel;
+    if (tid.x >= perSurfaceWidth || tid.y >= level.probesPerAxisThisLevel || tid.z >= kNumSurfaces) return;
+
+    uint surfaceId = tid.z;
+    uint probeX = tid.x / level.raysThisLevel;
+    uint dirIndex = tid.x % level.raysThisLevel;
+    uint probeY = tid.y;
+
+    float3 origin;
+    Basis tbn;
+    float2 uv;
+    cascadeProbeAt(surfaceId, probeX, probeY, level.probesPerAxisThisLevel, origin, tbn, uv);
+
+    // Rotates a little every frame so the temporal blend in
+    // cascadeIntegrateKernel averages away noise instead of freezing it.
+    float jitterSeed = float(surfaceId) * 37.0f + float(uniforms.frameIndex) * 0.6180339887f;
+    float jitter = fract(sin(dot(float2(probeX, probeY) + jitterSeed, float2(12.9898f, 78.233f))) * 43758.5453f) * (2.0f * kPi);
+
+    float3 sunDir = normalize(uniforms.sunDirection);
+    float3 dir = cascadeDirection(tbn, int(dirIndex), int(level.raysThisLevel), jitter);
+    float4 seg = traceCascadeInterval(origin, dir, level.tMin, level.tMax,
+                                      sunDir, uniforms.sunColor, uniforms.sunIntensity,
+                                      uniforms.numTeapotNodes, bvhNodes, triangles, prevAtlas);
+
+    float3 result;
+    if (level.raysUpperLevel == 0u) {
+        result = seg.w > 0.0f ? seg.xyz + seg.w * getSkyRadiance(dir, sunDir) * level.skyBoost : seg.xyz;
+    } else if (seg.w <= 0.0f) {
+        result = seg.xyz;
+    } else {
+        float3 fromUpper = float3(0.0f);
+        uint upperBase = dirIndex * 4u;
+        for (uint k = 0u; k < 4u; k++) {
+            fromUpper += 0.25f * sampleCascadeBilinear(upperCascade, surfaceId, uv,
+                                                        level.probesPerAxisUpperLevel, level.raysUpperLevel,
+                                                        upperBase + k);
+        }
+        result = seg.xyz + seg.w * fromUpper;
+    }
+
+    outCascade.write(float4(result, 1.0f), uint2(tid.x, tid.y), surfaceId);
 }
 
-// Probes of cascade N sit at the centre of every `stride`-texel block, so
-// higher cascades are shared by progressively larger patches of the atlas.
-inline void cascadeProbe(uint surfaceId, uint lx, uint ly, int stride,
-                         thread float3 &origin, thread Basis &tbn) {
-    int bx = clamp(int(lx) / stride * stride, 0, int(kAtlasSurfaceWidth) - stride);
-    int by = clamp(int(ly) / stride * stride, 0, int(kAtlasSurfaceHeight) - stride);
-    float2 uv = (float2(bx, by) + float(stride) * 0.5f + 0.5f) / float(kAtlasSurfaceWidth);
-
-    float3 pos, nor;
-    getSurfaceGeometry(surfaceId, uv, pos, nor);
-    tbn = makeTBN(nor);
-    origin = pos + nor * 0.004f;
-}
-
-// One thread per atlas texel. The four cascades are evaluated as a depth-first
-// walk of the direction tree rather than four flat passes, which keeps the
-// whole merge in registers instead of spilling ~3 KB of per-thread arrays.
-kernel void computeRadianceCascadesKernel(
+// Cascade 0 has exactly kAtlasSurfaceWidth probes per axis, one per output
+// atlas texel, so folding it into irradiance is a plain average over its
+// directions plus the existing history blend.
+kernel void cascadeIntegrateKernel(
     uint2 tid [[thread_position_in_grid]],
     texture2d<float, access::read_write> irradianceAtlas [[texture(0)]],
-    texture2d<float, access::sample> prevAtlas [[texture(1)]],
+    texture2d_array<float, access::read> cascade0 [[texture(1)]],
     constant GlassUniforms &uniforms [[buffer(0)]],
-    device const GPUBVHNode *bvhNodes [[buffer(1)]],
-    device const GPUTriangle *triangles [[buffer(2)]]
+    constant CascadeLevelParams &level [[buffer(1)]]
 ) {
     if (tid.x >= kAtlasSurfaceWidth * kNumSurfaces || tid.y >= kAtlasSurfaceHeight) return;
 
     uint surfaceId = tid.x / kAtlasSurfaceWidth;
-    uint lx = tid.x % kAtlasSurfaceWidth;
-    uint ly = tid.y;
+    uint probeX = tid.x % kAtlasSurfaceWidth;
+    uint probeY = tid.y;
 
-    float3 sunDir = normalize(uniforms.sunDirection);
-    float jitter = fract(sin(dot(float2(lx, ly) + float2(surfaceId * 37.0f),
-                                float2(12.9898f, 78.233f))) * 43758.5453f) * (2.0f * kPi);
+    uint base = probeX * level.raysThisLevel;
 
-    float3 originC0, originC1, originC2, originC3;
-    Basis tbnC0, tbnC1, tbnC2, tbnC3;
-    cascadeProbe(surfaceId, lx, ly, 1, originC0, tbnC0);
-    cascadeProbe(surfaceId, lx, ly, 2, originC1, tbnC1);
-    cascadeProbe(surfaceId, lx, ly, 4, originC2, tbnC2);
-    cascadeProbe(surfaceId, lx, ly, 8, originC3, tbnC3);
-
-    float3 accumIrradiance = float3(0.0f);
-
-    for (int i0 = 0; i0 < kRaysC0; i0++) {
-        float3 dir0 = cascadeDirection(tbnC0, i0, kRaysC0, jitter);
-        float4 seg0 = traceCascadeInterval(originC0, dir0, kCascadeRanges[0], kCascadeRanges[1],
-                                           sunDir, uniforms.sunColor, uniforms.sunIntensity,
-                                           uniforms.numTeapotNodes, bvhNodes, triangles, prevAtlas);
-        if (seg0.w <= 0.0f) {
-            accumIrradiance += seg0.xyz;
-            continue;
-        }
-
-        float3 fromC1 = float3(0.0f);
-        for (int a = 0; a < 2; a++) {
-            int i1 = 2 * i0 + a;
-            float3 dir1 = cascadeDirection(tbnC1, i1, kRaysC1, jitter);
-            float4 seg1 = traceCascadeInterval(originC1, dir1, kCascadeRanges[1], kCascadeRanges[2],
-                                               sunDir, uniforms.sunColor, uniforms.sunIntensity,
-                                               uniforms.numTeapotNodes, bvhNodes, triangles, prevAtlas);
-            if (seg1.w <= 0.0f) {
-                fromC1 += 0.5f * seg1.xyz;
-                continue;
-            }
-
-            float3 fromC2 = float3(0.0f);
-            for (int b = 0; b < 2; b++) {
-                int i2 = 2 * i1 + b;
-                float3 dir2 = cascadeDirection(tbnC2, i2, kRaysC2, jitter);
-                float4 seg2 = traceCascadeInterval(originC2, dir2, kCascadeRanges[2], kCascadeRanges[3],
-                                                   sunDir, uniforms.sunColor, uniforms.sunIntensity,
-                                                   uniforms.numTeapotNodes, bvhNodes, triangles, prevAtlas);
-                if (seg2.w <= 0.0f) {
-                    fromC2 += 0.5f * seg2.xyz;
-                    continue;
-                }
-
-                float3 fromC3 = float3(0.0f);
-                for (int c = 0; c < 2; c++) {
-                    int i3 = 2 * i2 + c;
-                    float3 dir3 = cascadeDirection(tbnC3, i3, kRaysC3, jitter);
-                    float4 seg3 = traceCascadeInterval(originC3, dir3, kCascadeRanges[3], kCascadeRanges[4],
-                                                       sunDir, uniforms.sunColor, uniforms.sunIntensity,
-                                                       uniforms.numTeapotNodes, bvhNodes, triangles, prevAtlas);
-                    // Nothing left to merge past the last cascade, so the
-                    // residual transmittance picks up the sky.
-                    fromC3 += 0.5f * (seg3.xyz + seg3.w * getSkyRadiance(dir3, sunDir));
-                }
-                fromC2 += 0.5f * (seg2.xyz + seg2.w * fromC3);
-            }
-            fromC1 += 0.5f * (seg1.xyz + seg1.w * fromC2);
-        }
-        accumIrradiance += seg0.xyz + seg0.w * fromC1;
+    float3 sum = float3(0.0f);
+    for (uint i = 0u; i < level.raysThisLevel; i++) {
+        sum += cascade0.read(uint2(base + i, probeY), surfaceId).rgb;
     }
-
-    float3 newIrradiance = accumIrradiance / float(kRaysC0);
+    float3 newIrradiance = sum / float(level.raysThisLevel);
 
     // Blend against the unfiltered history. Feeding the blurred atlas back in
     // would re-apply the spatial filter every frame and creep towards mush.

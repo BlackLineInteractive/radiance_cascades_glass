@@ -14,6 +14,32 @@
 #include "TeapotData.h"
 #include "Camera.h"
 
+struct CascadeLevelParams {
+    float tMin;
+    float tMax;
+    uint32_t raysThisLevel;
+    uint32_t raysUpperLevel;          // 0 marks the terminal (farthest) cascade.
+    uint32_t probesPerAxisThisLevel;
+    uint32_t probesPerAxisUpperLevel; // unused when raysUpperLevel == 0
+    float skyBoost;
+};
+
+// Cascade N covers [kCascadeRanges[N], kCascadeRanges[N+1]] along a ray, gathered
+// over a probesPerAxis x probesPerAxis grid with `rays` directions per probe.
+// Ray count quadruples per level (matching the 4x drop in probe density) so the
+// total ray budget - probes^2 * rays - is the same at every level.
+struct CascadeLevelSpec {
+    uint32_t probesPerAxis;
+    uint32_t rays;
+};
+static constexpr float kCascadeRanges[5] = { 0.005f, 0.25f, 0.80f, 2.50f, 100.0f };
+static constexpr CascadeLevelSpec kCascadeLevelSpecs[4] = {
+    { 64, 16 },
+    { 32, 64 },
+    { 16, 256 },
+    { 8, 1024 },
+};
+
 struct GlassUniforms {
     simd::float4x4 viewInverse;
     simd::float4x4 projectionInverse;
@@ -99,7 +125,8 @@ struct RendererState {
     id<MTLDevice> device;
     id<MTLCommandQueue> commandQueue;
 
-    id<MTLComputePipelineState> cascadePipeline;
+    id<MTLComputePipelineState> cascadeGatherPipeline;
+    id<MTLComputePipelineState> cascadeIntegratePipeline;
     id<MTLComputePipelineState> filterCascadePipeline;
     id<MTLComputePipelineState> causticsPipeline;
     id<MTLComputePipelineState> filterPipeline;
@@ -107,6 +134,9 @@ struct RendererState {
 
     id<MTLTexture> irradianceAtlas;
     id<MTLTexture> filteredIrradianceAtlas;
+    id<MTLTexture> cascadeTex[4];
+    id<MTLTexture> dummyCascadeTexture;
+    id<MTLBuffer> cascadeParamsBuffer[4];
     id<MTLTexture> causticTexture;
     id<MTLBuffer> causticBuffer;
     size_t causticBufferSize = 0;
@@ -204,13 +234,14 @@ bool initMetal(RendererState &state, const std::string &shaderPath, const std::s
         }
     }
 
-    id<MTLFunction> cascadeFunc       = [library newFunctionWithName:@"computeRadianceCascadesKernel"];
-    id<MTLFunction> filterCascadeFunc = [library newFunctionWithName:@"filterIrradianceAtlasKernel"];
+    id<MTLFunction> cascadeGatherFunc    = [library newFunctionWithName:@"cascadeGatherKernel"];
+    id<MTLFunction> cascadeIntegrateFunc = [library newFunctionWithName:@"cascadeIntegrateKernel"];
+    id<MTLFunction> filterCascadeFunc    = [library newFunctionWithName:@"filterIrradianceAtlasKernel"];
     id<MTLFunction> causticsFunc      = [library newFunctionWithName:@"generateCausticsKernel"];
     id<MTLFunction> filterFunc        = [library newFunctionWithName:@"filterCausticsKernel"];
     id<MTLFunction> sceneFunc         = [library newFunctionWithName:@"renderSceneKernel"];
 
-    if (!cascadeFunc || !filterCascadeFunc || !causticsFunc || !filterFunc || !sceneFunc) {
+    if (!cascadeGatherFunc || !cascadeIntegrateFunc || !filterCascadeFunc || !causticsFunc || !filterFunc || !sceneFunc) {
         std::cerr << "[Metal] Failed to locate required kernel functions in library.\n";
         return false;
     }
@@ -225,14 +256,15 @@ bool initMetal(RendererState &state, const std::string &shaderPath, const std::s
         return pso;
     };
 
-    state.cascadePipeline       = makePipeline(cascadeFunc, "radianceCascades");
-    state.filterCascadePipeline = makePipeline(filterCascadeFunc, "filterIrradiance");
-    state.causticsPipeline      = makePipeline(causticsFunc, "generateCaustics");
-    state.filterPipeline        = makePipeline(filterFunc, "filterCaustics");
-    state.scenePipeline         = makePipeline(sceneFunc, "renderScene");
+    state.cascadeGatherPipeline    = makePipeline(cascadeGatherFunc, "cascadeGather");
+    state.cascadeIntegratePipeline = makePipeline(cascadeIntegrateFunc, "cascadeIntegrate");
+    state.filterCascadePipeline    = makePipeline(filterCascadeFunc, "filterIrradiance");
+    state.causticsPipeline         = makePipeline(causticsFunc, "generateCaustics");
+    state.filterPipeline           = makePipeline(filterFunc, "filterCaustics");
+    state.scenePipeline            = makePipeline(sceneFunc, "renderScene");
 
-    if (!state.cascadePipeline || !state.filterCascadePipeline || !state.causticsPipeline ||
-        !state.filterPipeline || !state.scenePipeline) {
+    if (!state.cascadeGatherPipeline || !state.cascadeIntegratePipeline || !state.filterCascadePipeline ||
+        !state.causticsPipeline || !state.filterPipeline || !state.scenePipeline) {
         return false;
     }
 
@@ -244,6 +276,57 @@ bool initMetal(RendererState &state, const std::string &shaderPath, const std::s
     atlasDesc.storageMode = MTLStorageModePrivate;
     state.irradianceAtlas = [state.device newTextureWithDescriptor:atlasDesc];
     state.filteredIrradianceAtlas = [state.device newTextureWithDescriptor:atlasDesc];
+
+    // One array texture per cascade level (5 slices, one per room surface),
+    // sized probesPerAxis x probesPerAxis probes with `rays` directions packed
+    // per probe along X. A single (non-array) texture would exceed Metal's
+    // 16384-wide limit at the coarser levels once the ray count grows large.
+    // Each is fully overwritten by cascadeGatherKernel every frame, so unlike
+    // the atlas textures above they don't need a startup clear.
+    for (int level = 0; level < 4; level++) {
+        const CascadeLevelSpec &spec = kCascadeLevelSpecs[level];
+        uint32_t w = spec.probesPerAxis * spec.rays;
+        uint32_t h = spec.probesPerAxis;
+        MTLTextureDescriptor *cascDesc = [[MTLTextureDescriptor alloc] init];
+        cascDesc.textureType = MTLTextureType2DArray;
+        cascDesc.pixelFormat = MTLPixelFormatRGBA32Float;
+        cascDesc.width = w;
+        cascDesc.height = h;
+        cascDesc.arrayLength = 5;
+        cascDesc.mipmapLevelCount = 1;
+        cascDesc.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
+        cascDesc.storageMode = MTLStorageModePrivate;
+        state.cascadeTex[level] = [state.device newTextureWithDescriptor:cascDesc];
+
+        CascadeLevelParams params;
+        params.tMin = kCascadeRanges[level];
+        params.tMax = kCascadeRanges[level + 1];
+        params.raysThisLevel = spec.rays;
+        params.probesPerAxisThisLevel = spec.probesPerAxis;
+        if (level == 3) {
+            params.raysUpperLevel = 0;
+            params.probesPerAxisUpperLevel = 0;
+            params.skyBoost = 1.0f;
+        } else {
+            params.raysUpperLevel = kCascadeLevelSpecs[level + 1].rays;
+            params.probesPerAxisUpperLevel = kCascadeLevelSpecs[level + 1].probesPerAxis;
+            params.skyBoost = 0.0f;
+        }
+        state.cascadeParamsBuffer[level] = [state.device newBufferWithBytes:&params
+                                                                      length:sizeof(CascadeLevelParams)
+                                                                     options:MTLResourceStorageModeShared];
+    }
+
+    MTLTextureDescriptor *dummyDesc = [[MTLTextureDescriptor alloc] init];
+    dummyDesc.textureType = MTLTextureType2DArray;
+    dummyDesc.pixelFormat = MTLPixelFormatRGBA32Float;
+    dummyDesc.width = 1;
+    dummyDesc.height = 1;
+    dummyDesc.arrayLength = 1;
+    dummyDesc.mipmapLevelCount = 1;
+    dummyDesc.usage = MTLTextureUsageShaderRead;
+    dummyDesc.storageMode = MTLStorageModePrivate;
+    state.dummyCascadeTexture = [state.device newTextureWithDescriptor:dummyDesc];
 
     const uint32_t causticRes = 1024;
     MTLTextureDescriptor *cTexDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
@@ -333,19 +416,42 @@ void renderFrame(
     id<MTLBuffer> uniformBuffer = state.uniformBuffer;
     memcpy(uniformBuffer.contents, &uniforms, sizeof(GlassUniforms));
 
-    if (state.renderMode != 0 && state.cascadePipeline && state.irradianceAtlas) {
-        id<MTLComputeCommandEncoder> rcEnc = [cmdBuffer computeCommandEncoder];
-        [rcEnc setComputePipelineState:state.cascadePipeline];
-        [rcEnc setTexture:state.irradianceAtlas atIndex:0];
-        [rcEnc setTexture:state.filteredIrradianceAtlas atIndex:1];
-        [rcEnc setBuffer:uniformBuffer offset:0 atIndex:0];
-        if (state.teapotNodeBuffer) [rcEnc setBuffer:state.teapotNodeBuffer offset:0 atIndex:1];
-        if (state.teapotTriBuffer)  [rcEnc setBuffer:state.teapotTriBuffer offset:0 atIndex:2];
+    MTLSize rcTg = MTLSizeMake(16, 16, 1);
+    MTLSize rcGrid = MTLSizeMake((320 + 15) / 16, (64 + 15) / 16, 1);
 
-        MTLSize rcTg = MTLSizeMake(16, 16, 1);
-        MTLSize rcGrid = MTLSizeMake((320 + 15) / 16, (64 + 15) / 16, 1);
-        [rcEnc dispatchThreadgroups:rcGrid threadsPerThreadgroup:rcTg];
-        [rcEnc endEncoding];
+    if (state.renderMode != 0 && state.cascadeGatherPipeline && state.irradianceAtlas) {
+        // Far-to-near: level 3 has nothing above it to read, level 0 reads level 1,
+        // and so on down. Each dispatch covers exactly that level's probe x ray grid.
+        for (int level = 3; level >= 0; level--) {
+            const CascadeLevelSpec &spec = kCascadeLevelSpecs[level];
+            id<MTLTexture> upperTex = (level == 3) ? state.dummyCascadeTexture : state.cascadeTex[level + 1];
+
+            id<MTLComputeCommandEncoder> cgEnc = [cmdBuffer computeCommandEncoder];
+            [cgEnc setComputePipelineState:state.cascadeGatherPipeline];
+            [cgEnc setTexture:state.cascadeTex[level] atIndex:0];
+            [cgEnc setTexture:upperTex atIndex:1];
+            [cgEnc setTexture:state.filteredIrradianceAtlas atIndex:2];
+            [cgEnc setBuffer:uniformBuffer offset:0 atIndex:0];
+            [cgEnc setBuffer:state.cascadeParamsBuffer[level] offset:0 atIndex:1];
+            if (state.teapotNodeBuffer) [cgEnc setBuffer:state.teapotNodeBuffer offset:0 atIndex:2];
+            if (state.teapotTriBuffer)  [cgEnc setBuffer:state.teapotTriBuffer offset:0 atIndex:3];
+
+            uint32_t levelWidth = spec.probesPerAxis * spec.rays;
+            MTLSize cgGrid = MTLSizeMake((levelWidth + 15) / 16, (spec.probesPerAxis + 15) / 16, 5);
+            [cgEnc dispatchThreadgroups:cgGrid threadsPerThreadgroup:rcTg];
+            [cgEnc endEncoding];
+        }
+
+        if (state.cascadeIntegratePipeline) {
+            id<MTLComputeCommandEncoder> ciEnc = [cmdBuffer computeCommandEncoder];
+            [ciEnc setComputePipelineState:state.cascadeIntegratePipeline];
+            [ciEnc setTexture:state.irradianceAtlas atIndex:0];
+            [ciEnc setTexture:state.cascadeTex[0] atIndex:1];
+            [ciEnc setBuffer:uniformBuffer offset:0 atIndex:0];
+            [ciEnc setBuffer:state.cascadeParamsBuffer[0] offset:0 atIndex:1];
+            [ciEnc dispatchThreadgroups:rcGrid threadsPerThreadgroup:rcTg];
+            [ciEnc endEncoding];
+        }
 
         if (state.filterCascadePipeline && state.filteredIrradianceAtlas) {
             id<MTLComputeCommandEncoder> fcEnc = [cmdBuffer computeCommandEncoder];
