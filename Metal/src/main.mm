@@ -1,7 +1,10 @@
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
+#import <IOKit/IOKitLib.h>
 #include <simd/simd.h>
+#include <mach/mach.h>
+#include <sys/sysctl.h>
 
 #include <iostream>
 #include <vector>
@@ -160,6 +163,14 @@ struct RendererState {
 
     double lastFrameTime = 0.0;
     double fps = 60.0;
+    double gpuDurationMs = 0.0;
+    bool showStatsOverlay = true;
+
+    uint32_t currentWidth = 1280;
+    uint32_t currentHeight = 720;
+    uint32_t brightnessMode = 2; // 6 modes: 0..5 (0.8x, 1.8x, 2.8x, 4.2x, 6.5x, 10.0x)
+    uint32_t lightColorMode = 0; // 3 modes: 0 (Normal), 1 (Smooth RGB), 2 (Stepped RGB)
+    float animTime = 0.0f;
 };
 
 static RendererState gRenderer;
@@ -364,6 +375,23 @@ bool initMetal(RendererState &state, const std::string &shaderPath, const std::s
     return true;
 }
 
+static inline simd::float3 hsvToRgb(float h, float s, float v) {
+    float c = v * s;
+    float x = c * (1.0f - std::fabs(std::fmod(h * 6.0f, 2.0f) - 1.0f));
+    float m = v - c;
+    float r = 0, g = 0, b = 0;
+    int i = static_cast<int>(h * 6.0f) % 6;
+    switch (i) {
+        case 0: r = c; g = x; b = 0; break;
+        case 1: r = x; g = c; b = 0; break;
+        case 2: r = 0; g = c; b = x; break;
+        case 3: r = 0; g = x; b = c; break;
+        case 4: r = x; g = 0; b = c; break;
+        case 5: r = c; g = 0; b = x; break;
+    }
+    return simd::make_float3(r + m, g + m, b + m);
+}
+
 void renderFrame(
     RendererState &state,
     id<MTLTexture> targetTexture,
@@ -373,6 +401,9 @@ void renderFrame(
     uint32_t width  = static_cast<uint32_t>(targetTexture.width);
     uint32_t height = static_cast<uint32_t>(targetTexture.height);
 
+    state.currentWidth = width;
+    state.currentHeight = height;
+    state.animTime += deltaTime;
     state.camera.aspect = float(width) / float(height);
 
     if (!state.sunPaused) {
@@ -395,8 +426,32 @@ void renderFrame(
     uniforms.time = state.sunTime;
 
     uniforms.sunDirection = sunDir;
-    uniforms.sunIntensity = 2.8f;
-    uniforms.sunColor = simd::make_float3(1.0f, 0.98f, 0.92f);
+
+    // 6 brightness levels on 'B': 0.8x, 1.8x, 2.8x (default), 4.2x, 6.5x, 10.0x
+    static const float kBrightnessLevels[6] = { 0.8f, 1.8f, 2.8f, 4.2f, 6.5f, 10.0f };
+    uniforms.sunIntensity = kBrightnessLevels[state.brightnessMode % 6];
+
+    // 3 color modes on 'C': Normal, Smooth RGB, Stepped RGB
+    if (state.lightColorMode == 1) {
+        // Smooth RGB continuous rainbow cycle
+        float hue = std::fmod(state.animTime * 0.15f, 1.0f);
+        uniforms.sunColor = hsvToRgb(hue, 0.90f, 1.0f);
+    } else if (state.lightColorMode == 2) {
+        // Stepped sharp RGB switch
+        static const simd::float3 kStepColors[6] = {
+            simd::make_float3(1.0f, 0.12f, 0.12f),  // Red
+            simd::make_float3(0.12f, 1.0f, 0.12f),  // Green
+            simd::make_float3(0.15f, 0.45f, 1.0f),  // Blue
+            simd::make_float3(1.0f, 0.92f, 0.12f),  // Yellow
+            simd::make_float3(0.12f, 1.0f, 0.95f),  // Cyan
+            simd::make_float3(1.0f, 0.15f, 0.95f)   // Magenta
+        };
+        int stepIdx = static_cast<int>(state.animTime / 0.85f) % 6;
+        uniforms.sunColor = kStepColors[stepIdx];
+    } else {
+        // Normal warm sunlight
+        uniforms.sunColor = simd::make_float3(1.0f, 0.98f, 0.92f);
+    }
     uniforms.ambientIntensity = 0.25f;
 
     uniforms.glassIor = 1.52f;
@@ -520,8 +575,170 @@ void renderFrame(
 - (BOOL)canBecomeMainWindow { return YES; }
 @end
 
+struct SystemMetrics {
+    double procRamMB = 0.0;
+    double sysUsedRamGB = 0.0;
+    double sysTotalRamGB = 0.0;
+    double appVramMB = 0.0;
+    double totalVramMB = 0.0;
+    int ioGpuLoad = -1;
+};
+
+static inline NSString *getGpuTypeDescription(id<MTLDevice> device) {
+    if (!device) return @"Unknown";
+    if (device.hasUnifiedMemory) {
+        return @"Apple Silicon (Unified Memory)";
+    } else if (device.isLowPower) {
+        return @"Integrated GPU";
+    } else {
+        return @"Discrete GPU (PCIe)";
+    }
+}
+
+static inline SystemMetrics querySystemMetrics(id<MTLDevice> device) {
+    SystemMetrics m;
+    mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
+        m.procRamMB = info.resident_size / (1024.0 * 1024.0);
+    }
+    uint64_t totalRamBytes = 0;
+    size_t len = sizeof(totalRamBytes);
+    sysctlbyname("hw.memsize", &totalRamBytes, &len, NULL, 0);
+    m.sysTotalRamGB = totalRamBytes / (1024.0 * 1024.0 * 1024.0);
+
+    vm_statistics64_data_t vm_stat;
+    mach_msg_type_number_t host_count = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vm_stat, &host_count) == KERN_SUCCESS) {
+        uint64_t usedRamBytes = (vm_stat.active_count + vm_stat.wire_count + vm_stat.speculative_count) * (uint64_t)vm_page_size;
+        m.sysUsedRamGB = usedRamBytes / (1024.0 * 1024.0 * 1024.0);
+    }
+    if (device) {
+        m.appVramMB = [device currentAllocatedSize] / (1024.0 * 1024.0);
+        m.totalVramMB = [device recommendedMaxWorkingSetSize] / (1024.0 * 1024.0);
+    }
+    CFMutableDictionaryRef matching = IOServiceMatching("IOAccelerator");
+    io_iterator_t iterator;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS) {
+        io_registry_entry_t entry;
+        while ((entry = IOIteratorNext(iterator))) {
+            CFMutableDictionaryRef props = nullptr;
+            if (IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, kNilOptions) == KERN_SUCCESS && props) {
+                NSDictionary *dict = (__bridge NSDictionary *)props;
+                NSDictionary *perf = dict[@"PerformanceStatistics"];
+                if (perf && perf[@"Device Utilization %"]) {
+                    int val = [perf[@"Device Utilization %"] intValue];
+                    if (val > m.ioGpuLoad) m.ioGpuLoad = val;
+                }
+                CFRelease(props);
+            }
+            IOObjectRelease(entry);
+        }
+        IOObjectRelease(iterator);
+    }
+    return m;
+}
+
+@interface RCStatsOverlayView : NSView
+@property (nonatomic, strong) NSTextField *textField;
+- (void)updateWithRenderer:(const RendererState &)state;
+@end
+
+@implementation RCStatsOverlayView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.wantsLayer = YES;
+        self.layer.backgroundColor = [[NSColor colorWithCalibratedRed:0.06 green:0.08 blue:0.12 alpha:0.86] CGColor];
+        self.layer.cornerRadius = 10.0;
+        self.layer.borderWidth = 1.0;
+        self.layer.borderColor = [[NSColor colorWithCalibratedRed:0.25 green:0.35 blue:0.50 alpha:0.35] CGColor];
+        self.layer.shadowColor = [[NSColor blackColor] CGColor];
+        self.layer.shadowOpacity = 0.45;
+        self.layer.shadowRadius = 8.0;
+        self.layer.shadowOffset = CGSizeMake(0, -3);
+
+        NSRect textFrame = NSInsetRect(self.bounds, 14, 10);
+        self.textField = [[NSTextField alloc] initWithFrame:textFrame];
+        self.textField.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        self.textField.editable = NO;
+        self.textField.selectable = NO;
+        self.textField.bezeled = NO;
+        self.textField.drawsBackground = NO;
+
+        NSFont *font = [NSFont monospacedSystemFontOfSize:11.5 weight:NSFontWeightMedium];
+        if (!font) font = [NSFont userFixedPitchFontOfSize:11.5];
+        self.textField.font = font;
+        self.textField.textColor = [NSColor colorWithCalibratedRed:0.90 green:0.94 blue:0.98 alpha:1.0];
+        [self addSubview:self.textField];
+    }
+    return self;
+}
+
+- (NSView *)hitTest:(NSPoint)point {
+    return nil;
+}
+
+- (void)updateWithRenderer:(const RendererState &)state {
+    double frameTimeMs = (state.fps > 0.0) ? (1000.0 / state.fps) : 0.0;
+    double gpuDutyCycle = (frameTimeMs > 0.001) ? (state.gpuDurationMs / frameTimeMs) * 100.0 : 0.0;
+    gpuDutyCycle = std::min(100.0, std::max(0.0, gpuDutyCycle));
+
+    SystemMetrics m = querySystemMetrics(state.device);
+    double effectiveGpuLoad = (m.ioGpuLoad >= 0) ? std::max((double)m.ioGpuLoad, gpuDutyCycle) : gpuDutyCycle;
+
+    const char *modeNames[] = {
+        "Mode 0: Whitted RT Baseline",
+        "Mode 1: Clear Glass + Caustics",
+        "Mode 2: Frosted Rough Glass",
+        "Mode 3: High Dispersion Prism"
+    };
+    const char *modeStr = (state.renderMode <= 3) ? modeNames[state.renderMode] : "Custom";
+
+    static const char *colorModeNames[] = {
+        "Normal (Warm Sun)",
+        "Smooth RGB Rainbow",
+        "Stepped Sharp RGB"
+    };
+    static const float kBrightnessLevels[6] = { 0.8f, 1.8f, 2.8f, 4.2f, 6.5f, 10.0f };
+    const char *colorStr = (state.lightColorMode < 3) ? colorModeNames[state.lightColorMode] : "Normal";
+    float curBrightness = kBrightnessLevels[state.brightnessMode % 6];
+
+    NSString *str = [NSString stringWithFormat:
+        @"Resolution:  %ux%u\n"
+        @"GPU:         %@\n"
+        @"Model:       %@\n"
+        @"GPU Load:    %3.0f%%  (GPU Time: %4.1f ms)\n"
+        @"Framerate:   %4.1f FPS  (%4.1f ms)\n"
+        @"VRAM:        %4.0f MB alloc  / %4.0f MB max\n"
+        @"RAM:         %4.0f MB app    | %4.1f / %4.1f GB sys\n"
+        @"Mode:        %s\n"
+        @"Roughness:   %.2f\n"
+        @"Brightness:  Mode %u/6 (%.1fx)\n"
+        @"Light Color: %s",
+        state.currentWidth, state.currentHeight,
+        state.device ? [state.device name] : @"Metal Device",
+        getGpuTypeDescription(state.device),
+        effectiveGpuLoad, state.gpuDurationMs,
+        state.fps, frameTimeMs,
+        m.appVramMB, m.totalVramMB,
+        m.procRamMB, m.sysUsedRamGB, m.sysTotalRamGB,
+        modeStr, state.glassRoughness,
+        (state.brightnessMode % 6) + 1, curBrightness,
+        colorStr
+    ];
+    [self.textField setStringValue:str];
+}
+
+@end
+
 @interface RCGlassView : MTKView <MTKViewDelegate>
 @property (nonatomic, assign) NSPoint lastMousePos;
+@property (nonatomic, strong) RCStatsOverlayView *statsOverlay;
+- (void)toggleStatsOverlay;
+- (void)cycleBrightnessMode;
+- (void)cycleLightColorMode;
 @end
 
 @implementation RCGlassView
@@ -534,8 +751,56 @@ void renderFrame(
         self.colorPixelFormat = MTLPixelFormatRGBA16Float;
         self.framebufferOnly = NO;
         gRenderer.lastFrameTime = CACurrentMediaTime();
+
+        NSRect overlayFrame = NSMakeRect(16, frameRect.size.height - 195 - 16, 390, 195);
+        self.statsOverlay = [[RCStatsOverlayView alloc] initWithFrame:overlayFrame];
+        self.statsOverlay.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+        self.statsOverlay.hidden = !gRenderer.showStatsOverlay;
+        [self addSubview:self.statsOverlay];
+        [self.statsOverlay updateWithRenderer:gRenderer];
     }
     return self;
+}
+
+- (void)toggleStatsOverlay {
+    gRenderer.showStatsOverlay = !gRenderer.showStatsOverlay;
+    self.statsOverlay.hidden = !gRenderer.showStatsOverlay;
+    if (gRenderer.showStatsOverlay) {
+        [self.statsOverlay updateWithRenderer:gRenderer];
+    }
+    std::cout << "[HUD] Statistics overlay: " << (gRenderer.showStatsOverlay ? "SHOWN" : "HIDDEN") << "\n";
+}
+
+- (void)cycleBrightnessMode {
+    static const float kBrightnessLevels[6] = { 0.8f, 1.8f, 2.8f, 4.2f, 6.5f, 10.0f };
+    static const char *kBrightnessNames[6] = {
+        "0.8x (Dim Twilight)",
+        "1.8x (Soft Light)",
+        "2.8x (Normal Default)",
+        "4.2x (Bright Sun)",
+        "6.5x (Intense Caustics)",
+        "10.0x (Overdrive Caustics)"
+    };
+    gRenderer.brightnessMode = (gRenderer.brightnessMode + 1) % 6;
+    std::cout << "[Light] Brightness mode " << (gRenderer.brightnessMode + 1) << "/6: "
+              << kBrightnessNames[gRenderer.brightnessMode] << " (" << kBrightnessLevels[gRenderer.brightnessMode] << "x)\n";
+    if (gRenderer.showStatsOverlay) {
+        [self.statsOverlay updateWithRenderer:gRenderer];
+    }
+}
+
+- (void)cycleLightColorMode {
+    static const char *kColorNames[3] = {
+        "Normal (Warm Sunlight)",
+        "Smooth RGB Rainbow Cycle",
+        "Stepped Sharp RGB Switch"
+    };
+    gRenderer.lightColorMode = (gRenderer.lightColorMode + 1) % 3;
+    std::cout << "[Light] Color mode " << (gRenderer.lightColorMode + 1) << "/3: "
+              << kColorNames[gRenderer.lightColorMode] << "\n";
+    if (gRenderer.showStatsOverlay) {
+        [self.statsOverlay updateWithRenderer:gRenderer];
+    }
 }
 
 - (BOOL)acceptsFirstResponder { return YES; }
@@ -559,7 +824,23 @@ void renderFrame(
         id<MTLCommandBuffer> cmdBuffer = [gRenderer.commandQueue commandBuffer];
         renderFrame(gRenderer, drawable.texture, cmdBuffer, static_cast<float>(dt));
         [cmdBuffer presentDrawable:drawable];
+
+        [cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+            CFTimeInterval gpuStart = cb.GPUStartTime;
+            CFTimeInterval gpuEnd = cb.GPUEndTime;
+            if (gpuEnd > gpuStart) {
+                double durMs = (gpuEnd - gpuStart) * 1000.0;
+                gRenderer.gpuDurationMs = (gRenderer.gpuDurationMs == 0.0)
+                    ? durMs
+                    : (gRenderer.gpuDurationMs * 0.9 + durMs * 0.1);
+            }
+        }];
+
         [cmdBuffer commit];
+
+        if (gRenderer.frameCount % 6 == 0 && gRenderer.showStatsOverlay) {
+            [self.statsOverlay updateWithRenderer:gRenderer];
+        }
 
         if (gRenderer.frameCount % 60 == 0) {
             NSString *title = [NSString stringWithFormat:@"Radiance Cascades Glass | Mode: %u | FPS: %.1f | Res: %ux%u",
@@ -604,11 +885,44 @@ void renderFrame(
 }
 
 - (void)keyDown:(NSEvent *)event {
+    if (event.keyCode == 31) { // 'O' physical keycode across any keyboard layout
+        [self toggleStatsOverlay];
+        return;
+    }
+    if (event.keyCode == 11) { // 'B' physical keycode across any keyboard layout
+        [self cycleBrightnessMode];
+        return;
+    }
+    if (event.keyCode == 8) { // 'C' physical keycode across any keyboard layout
+        [self cycleLightColorMode];
+        return;
+    }
+
     NSString *chars = [event charactersIgnoringModifiers];
     if ([chars length] == 0) return;
     unichar c = [chars characterAtIndex:0];
 
     switch (c) {
+        case 'o':
+        case 'O':
+        case 0x043E: // Ukrainian Cyrillic 'о'
+        case 0x041E: // Ukrainian Cyrillic 'О'
+            [self toggleStatsOverlay];
+            break;
+        case 'b':
+        case 'B':
+        case 0x0431: // Ukrainian 'б'
+        case 0x0411: // Ukrainian 'Б'
+        case 0x0438: // Ukrainian 'и' (key B on standard keyboard)
+        case 0x0418: // Ukrainian 'И'
+            [self cycleBrightnessMode];
+            break;
+        case 'c':
+        case 'C':
+        case 0x0441: // Ukrainian 'с'
+        case 0x0421: // Ukrainian 'С'
+            [self cycleLightColorMode];
+            break;
         case ' ':
             gRenderer.sunPaused = !gRenderer.sunPaused;
             std::cout << "[Sun] Dynamic motion: " << (gRenderer.sunPaused ? "PAUSED" : "RESUMED") << "\n";
@@ -737,6 +1051,9 @@ void renderFrame(
     std::cout << "    [3]                 : High Dispersion Prism Mode\n";
     std::cout << "    [0]                 : Whitted Ray Tracing Baseline\n";
     std::cout << "    [+/-]               : Adjust Roughness\n";
+    std::cout << "    [B]                 : Cycle Light Brightness (6 Modes: 0.8x -> 10.0x)\n";
+    std::cout << "    [C]                 : Cycle Light Color (Normal -> Smooth RGB -> Step RGB)\n";
+    std::cout << "    [O]                 : Toggle Hardware & Performance Stats Overlay\n";
     std::cout << "    [R]                 : Reset Camera\n";
     std::cout << "    [S]                 : Screenshot (1080p)\n";
     std::cout << "    [ESC]               : Quit\n\n";

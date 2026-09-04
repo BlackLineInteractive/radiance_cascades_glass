@@ -199,6 +199,9 @@ cd OpenGL && ./build.sh && ./rc_glass_gl
 | **3** | Switch to **Mode 3** (High Spectral Dispersion Prism) |
 | **0** | Switch to **Mode 0** (Whitted Ray Tracing Baseline) |
 | **+ / -** | Increase / decrease glass surface roughness |
+| **B** | Cycle sunlight brightness (6 modes: 0.8x -> 10.0x) |
+| **C** | Cycle light color (Normal -> Smooth RGB rainbow -> Stepped sharp RGB) |
+| **O** | Toggle hardware & performance stats overlay (GPU, load, VRAM, RAM, FPS) |
 | **R** | Reset camera to default perspective |
 | **S** | Capture high-resolution screenshot to `output/` |
 | **Esc** | Exit application |

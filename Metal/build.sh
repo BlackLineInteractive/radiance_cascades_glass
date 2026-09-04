@@ -20,6 +20,7 @@ clang++ -std=c++17 -O3 -Wall \
     -framework Metal \
     -framework MetalKit \
     -framework QuartzCore \
+    -framework IOKit \
     -I"$ROOT_DIR/assets" \
     -I"$ROOT_DIR/common" \
     -I"$ROOT_DIR/Metal/src" \

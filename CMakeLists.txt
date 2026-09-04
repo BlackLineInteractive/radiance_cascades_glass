@@ -69,5 +69,6 @@ if(BUILD_METAL AND APPLE)
         "-framework Metal"
         "-framework MetalKit"
         "-framework QuartzCore"
+        "-framework IOKit"
     )
 endif()
