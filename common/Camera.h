@@ -122,14 +122,14 @@ public:
     simd::float4x4 getViewMatrix() const {
         simd::float3 eye = getPosition();
         simd::float3 f = simd::normalize(target - eye);
-        simd::float3 r = simd::normalize(simd::cross(simd::make_float3(0.0f, 1.0f, 0.0f), f));
-        simd::float3 u = simd::cross(f, r);
+        simd::float3 s = simd::normalize(simd::cross(f, simd::make_float3(0.0f, 1.0f, 0.0f)));
+        simd::float3 u = simd::cross(s, f);
 
         simd::float4x4 m;
-        m.columns[0] = simd::make_float4(r.x, u.x, -f.x, 0.0f);
-        m.columns[1] = simd::make_float4(r.y, u.y, -f.y, 0.0f);
-        m.columns[2] = simd::make_float4(r.z, u.z, -f.z, 0.0f);
-        m.columns[3] = simd::make_float4(-simd::dot(r, eye), -simd::dot(u, eye), simd::dot(f, eye), 1.0f);
+        m.columns[0] = simd::make_float4(s.x, u.x, -f.x, 0.0f);
+        m.columns[1] = simd::make_float4(s.y, u.y, -f.y, 0.0f);
+        m.columns[2] = simd::make_float4(s.z, u.z, -f.z, 0.0f);
+        m.columns[3] = simd::make_float4(-simd::dot(s, eye), -simd::dot(u, eye), simd::dot(f, eye), 1.0f);
         return m;
     }
 

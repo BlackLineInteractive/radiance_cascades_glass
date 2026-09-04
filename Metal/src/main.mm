@@ -9,6 +9,7 @@
 #include <chrono>
 #include <fstream>
 #include <string>
+#include <cstring>
 
 #include "TeapotData.h"
 #include "Camera.h"
@@ -110,6 +111,7 @@ struct RendererState {
     id<MTLBuffer> causticBuffer;
     size_t causticBufferSize = 0;
 
+    id<MTLBuffer> uniformBuffer;
     id<MTLBuffer> teapotNodeBuffer;
     id<MTLBuffer> teapotTriBuffer;
     uint32_t numTeapotNodes = 0;
@@ -138,6 +140,22 @@ static std::string resolveExistingPath(const std::vector<std::string> &candidate
         if (f.good()) return c;
     }
     return candidates.empty() ? "" : candidates[0];
+}
+
+// Private textures come back with undefined contents, and both the irradiance
+// atlas and the caustic target are read before they are first fully written.
+static void clearTextures(RendererState &state, NSArray<id<MTLTexture>> *textures) {
+    id<MTLCommandBuffer> cmd = [state.commandQueue commandBuffer];
+    for (id<MTLTexture> tex in textures) {
+        MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = tex;
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        [[cmd renderCommandEncoderWithDescriptor:pass] endEncoding];
+    }
+    [cmd commit];
+    [cmd waitUntilCompleted];
 }
 
 bool initMetal(RendererState &state, const std::string &shaderPath, const std::string &teapotBinPath) {
@@ -192,27 +210,37 @@ bool initMetal(RendererState &state, const std::string &shaderPath, const std::s
     id<MTLFunction> filterFunc        = [library newFunctionWithName:@"filterCausticsKernel"];
     id<MTLFunction> sceneFunc         = [library newFunctionWithName:@"renderSceneKernel"];
 
-    if (!causticsFunc || !filterFunc || !sceneFunc) {
+    if (!cascadeFunc || !filterCascadeFunc || !causticsFunc || !filterFunc || !sceneFunc) {
         std::cerr << "[Metal] Failed to locate required kernel functions in library.\n";
         return false;
     }
 
-    if (cascadeFunc) {
-        state.cascadePipeline = [state.device newComputePipelineStateWithFunction:cascadeFunc error:&error];
-    }
-    if (filterCascadeFunc) {
-        state.filterCascadePipeline = [state.device newComputePipelineStateWithFunction:filterCascadeFunc error:&error];
-    }
+    auto makePipeline = [&](id<MTLFunction> fn, const char *label) -> id<MTLComputePipelineState> {
+        NSError *err = nil;
+        id<MTLComputePipelineState> pso = [state.device newComputePipelineStateWithFunction:fn error:&err];
+        if (!pso) {
+            std::cerr << "[Metal] Pipeline '" << label << "' failed: "
+                      << (err ? [[err localizedDescription] UTF8String] : "unknown error") << "\n";
+        }
+        return pso;
+    };
 
-    state.causticsPipeline = [state.device newComputePipelineStateWithFunction:causticsFunc error:&error];
-    state.filterPipeline   = [state.device newComputePipelineStateWithFunction:filterFunc error:&error];
-    state.scenePipeline    = [state.device newComputePipelineStateWithFunction:sceneFunc error:&error];
+    state.cascadePipeline       = makePipeline(cascadeFunc, "radianceCascades");
+    state.filterCascadePipeline = makePipeline(filterCascadeFunc, "filterIrradiance");
+    state.causticsPipeline      = makePipeline(causticsFunc, "generateCaustics");
+    state.filterPipeline        = makePipeline(filterFunc, "filterCaustics");
+    state.scenePipeline         = makePipeline(sceneFunc, "renderScene");
+
+    if (!state.cascadePipeline || !state.filterCascadePipeline || !state.causticsPipeline ||
+        !state.filterPipeline || !state.scenePipeline) {
+        return false;
+    }
 
     MTLTextureDescriptor *atlasDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
                                                                                          width:320
                                                                                         height:64
                                                                                      mipmapped:NO];
-    atlasDesc.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
+    atlasDesc.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
     atlasDesc.storageMode = MTLStorageModePrivate;
     state.irradianceAtlas = [state.device newTextureWithDescriptor:atlasDesc];
     state.filteredIrradianceAtlas = [state.device newTextureWithDescriptor:atlasDesc];
@@ -222,12 +250,17 @@ bool initMetal(RendererState &state, const std::string &shaderPath, const std::s
                                                                                         width:causticRes
                                                                                        height:causticRes
                                                                                     mipmapped:NO];
-    cTexDesc.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
+    cTexDesc.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
     cTexDesc.storageMode = MTLStorageModePrivate;
     state.causticTexture = [state.device newTextureWithDescriptor:cTexDesc];
 
     state.causticBufferSize = causticRes * causticRes * 4 * sizeof(uint32_t);
     state.causticBuffer = [state.device newBufferWithLength:state.causticBufferSize options:MTLResourceStorageModePrivate];
+
+    clearTextures(state, @[ state.irradianceAtlas, state.filteredIrradianceAtlas, state.causticTexture ]);
+
+    state.uniformBuffer = [state.device newBufferWithLength:sizeof(GlassUniforms)
+                                                    options:MTLResourceStorageModeShared];
 
     TeapotMesh teapot;
     if (teapot.loadFromBinary(teapotBinPath)) {
@@ -297,9 +330,8 @@ void renderFrame(
     uniforms.numTeapotTris  = state.numTeapotTris;
     uniforms.pad = simd::make_float2(0.0f);
 
-    id<MTLBuffer> uniformBuffer = [state.device newBufferWithBytes:&uniforms
-                                                            length:sizeof(GlassUniforms)
-                                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> uniformBuffer = state.uniformBuffer;
+    memcpy(uniformBuffer.contents, &uniforms, sizeof(GlassUniforms));
 
     if (state.renderMode != 0 && state.cascadePipeline && state.irradianceAtlas) {
         id<MTLComputeCommandEncoder> rcEnc = [cmdBuffer computeCommandEncoder];
@@ -587,9 +619,7 @@ void renderFrame(
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 
-    std::cout << "=================================================================\n";
-    std::cout << "  Radiance Cascades Glass & Caustics Engine\n";
-    std::cout << "=================================================================\n";
+    std::cout << "Radiance Cascades Glass & Caustics\n\n";
     std::cout << "  Controls:\n";
     std::cout << "    [Left Mouse Drag]   : Orbit Camera\n";
     std::cout << "    [Option + Drag]     : Pan Camera\n";
@@ -603,8 +633,7 @@ void renderFrame(
     std::cout << "    [+/-]               : Adjust Roughness\n";
     std::cout << "    [R]                 : Reset Camera\n";
     std::cout << "    [S]                 : Screenshot (1080p)\n";
-    std::cout << "    [ESC]               : Quit\n";
-    std::cout << "=================================================================\n\n";
+    std::cout << "    [ESC]               : Quit\n\n";
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
@@ -614,9 +643,7 @@ void renderFrame(
 @end
 
 int runHeadlessBenchmark(RendererState &state) {
-    std::cout << "\n=================================================================\n";
-    std::cout << "  Radiance Cascades Glass Benchmark\n";
-    std::cout << "=================================================================\n";
+    std::cout << "\n1920x1080, 20 frames per mode after 3 warm-up frames\n";
 
     system("mkdir -p output");
 
@@ -637,14 +664,13 @@ int runHeadlessBenchmark(RendererState &state) {
         uint32_t mode;
         std::string name;
         std::string filename;
-        std::string description;
     };
 
     std::vector<ModeTest> modes = {
-        { 1, "Mode 1: Realistic Glass + Caustics", "rc_glass_scene.png", "Snell refraction + Fresnel + Cauchy dispersion + floor caustics" },
-        { 2, "Mode 2: Frosted / Rough Glass Cascade", "rc_glass_frosted.png", "Micro-roughness transmission cone + diffused caustic filter" },
-        { 3, "Mode 3: High Spectral Dispersion Prism", "rc_glass_dispersion.png", "Amplified dispersion on Newton's prism & crystal sphere" },
-        { 0, "Mode 0: Whitted RT Baseline", "rc_glass_whitted.png", "Classic binary shadow ray (zero caustics, dark shadow)" }
+        { 1, "clear glass", "rc_glass_scene.png" },
+        { 2, "frosted glass", "rc_glass_frosted.png" },
+        { 3, "high dispersion", "rc_glass_dispersion.png" },
+        { 0, "whitted baseline", "rc_glass_whitted.png" }
     };
 
     for (const auto &test : modes) {
@@ -683,13 +709,11 @@ int runHeadlessBenchmark(RendererState &state) {
         std::string outPath = "output/" + test.filename;
         saveTextureToPNG(targetTex, outPath);
 
-        std::cout << ">>> " << test.name << "\n";
-        std::cout << "    " << test.description << "\n";
-        std::cout << "    [Perf] " << avgFrameMs << " ms (" << fps << " FPS)\n";
-        std::cout << "    [Output] " << outPath << "\n\n";
+        std::cout << "  mode " << test.mode << "  " << test.name
+                  << "  " << avgFrameMs << " ms (" << fps << " fps)"
+                  << "  -> " << outPath << "\n";
     }
 
-    std::cout << "Benchmark complete. All 4 optical modes verified.\n";
     return 0;
 }
 

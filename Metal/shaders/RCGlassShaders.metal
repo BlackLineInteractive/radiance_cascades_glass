@@ -121,7 +121,7 @@ inline float3 beerLambertAbsorption(float3 absorptionCoeff, float distance) {
     return exp(-absorptionCoeff * distance);
 }
 
-inline bool intersectBox(Ray ray, float3 bmin, float3 bmax, thread float &tHit, thread float3 &hitNormal) {
+inline bool intersectBox(Ray ray, float3 bmin, float3 bmax, float tMin, thread float &tHit, thread float3 &hitNormal) {
     float3 invD = 1.0f / (ray.direction + float3(1e-12f));
     float3 t0 = (bmin - ray.origin) * invD;
     float3 t1 = (bmax - ray.origin) * invD;
@@ -132,9 +132,9 @@ inline bool intersectBox(Ray ray, float3 bmin, float3 bmax, thread float &tHit, 
     float enter = max(max(tmin.x, tmin.y), tmin.z);
     float exit  = min(min(tmax.x, tmax.y), tmax.z);
 
-    if (enter > exit || exit < 0.001f) return false;
+    if (enter > exit || exit < tMin) return false;
 
-    float t = enter > 0.001f ? enter : exit;
+    float t = enter > tMin ? enter : exit;
     tHit = t;
 
     float3 p = ray.origin + ray.direction * t;
@@ -167,7 +167,7 @@ inline bool intersectBoxFast(Ray ray, float3 bmin, float3 bmax, thread float &tN
     return (enter <= exit && exit > 0.001f);
 }
 
-inline bool intersectSphere(Ray ray, float3 center, float radius, thread float &tHit, thread float3 &hitNormal) {
+inline bool intersectSphere(Ray ray, float3 center, float radius, float tMin, thread float &tHit, thread float3 &hitNormal) {
     float3 oc = ray.origin - center;
     float b = dot(oc, ray.direction);
     float c = dot(oc, oc) - radius * radius;
@@ -175,23 +175,16 @@ inline bool intersectSphere(Ray ray, float3 center, float radius, thread float &
     if (disc < 0.0f) return false;
 
     float sqrtDisc = sqrt(disc);
-    float t0 = -b - sqrtDisc;
-    float t1 = -b + sqrtDisc;
+    float t = -b - sqrtDisc;
+    if (t < tMin) t = -b + sqrtDisc;
+    if (t < tMin) return false;
 
-    if (t0 > 0.001f) {
-        tHit = t0;
-        hitNormal = normalize((ray.origin + ray.direction * t0) - center);
-        return true;
-    }
-    if (t1 > 0.001f) {
-        tHit = t1;
-        hitNormal = normalize((ray.origin + ray.direction * t1) - center);
-        return true;
-    }
-    return false;
+    tHit = t;
+    hitNormal = normalize((ray.origin + ray.direction * t) - center);
+    return true;
 }
 
-inline bool intersectCylinder(Ray ray, float3 base, float radius, float height, thread float &tHit, thread float3 &hitNormal) {
+inline bool intersectCylinder(Ray ray, float3 base, float radius, float height, float tMin, thread float &tHit, thread float3 &hitNormal) {
     float3 d = ray.direction;
     float3 o = ray.origin - base;
 
@@ -210,7 +203,7 @@ inline bool intersectCylinder(Ray ray, float3 base, float radius, float height, 
             float t0 = (-b - sqrtD) / (2.0f * a);
             float t1 = (-b + sqrtD) / (2.0f * a);
 
-            if (t0 > 0.001f) {
+            if (t0 > tMin) {
                 float y = o.y + d.y * t0;
                 if (y >= 0.0f && y <= height) {
                     tClosest = t0;
@@ -218,7 +211,7 @@ inline bool intersectCylinder(Ray ray, float3 base, float radius, float height, 
                     found = true;
                 }
             }
-            if (!found && t1 > 0.001f) {
+            if (!found && t1 > tMin) {
                 float y = o.y + d.y * t1;
                 if (y >= 0.0f && y <= height) {
                     tClosest = t1;
@@ -231,7 +224,7 @@ inline bool intersectCylinder(Ray ray, float3 base, float radius, float height, 
 
     if (abs(d.y) > 1e-6f) {
         float tCap = (height - o.y) / d.y;
-        if (tCap > 0.001f && tCap < tClosest) {
+        if (tCap > tMin && tCap < tClosest) {
             float x = o.x + d.x * tCap;
             float z = o.z + d.z * tCap;
             if (x * x + z * z <= radius * radius) {
@@ -241,7 +234,7 @@ inline bool intersectCylinder(Ray ray, float3 base, float radius, float height, 
             }
         }
         float tBase = -o.y / d.y;
-        if (tBase > 0.001f && tBase < tClosest) {
+        if (tBase > tMin && tBase < tClosest) {
             float x = o.x + d.x * tBase;
             float z = o.z + d.z * tBase;
             if (x * x + z * z <= radius * radius) {
@@ -260,7 +253,7 @@ inline bool intersectCylinder(Ray ray, float3 base, float radius, float height, 
     return false;
 }
 
-inline bool intersectTriangularPrism(Ray ray, float3 baseCenter, float side, float height, thread float &tHit, thread float3 &hitNormal) {
+inline bool intersectTriangularPrism(Ray ray, float3 baseCenter, float side, float height, float tMin, thread float &tHit, thread float3 &hitNormal) {
     float h = side * 0.8660254f;
     float3 p0 = baseCenter + float3(0.0f, 0.0f, 2.0f * h / 3.0f);
     float3 p1 = baseCenter + float3(-side * 0.5f, 0.0f, -h / 3.0f);
@@ -280,7 +273,7 @@ inline bool intersectTriangularPrism(Ray ray, float3 baseCenter, float side, flo
         float denom = dot(ray.direction, sideNorm);
         if (abs(denom) > 1e-6f) {
             float t = dot(a - ray.origin, sideNorm) / denom;
-            if (t > 0.001f && t < tClosest) {
+            if (t > tMin && t < tClosest) {
                 float3 p = ray.origin + ray.direction * t;
                 if (p.y >= baseCenter.y && p.y <= baseCenter.y + height) {
                     float3 ap = p - a;
@@ -298,7 +291,7 @@ inline bool intersectTriangularPrism(Ray ray, float3 baseCenter, float side, flo
 
     if (abs(ray.direction.y) > 1e-6f) {
         float tTop = (baseCenter.y + height - ray.origin.y) / ray.direction.y;
-        if (tTop > 0.001f && tTop < tClosest) {
+        if (tTop > tMin && tTop < tClosest) {
             float3 p = ray.origin + ray.direction * tTop;
             float2 v0 = p2.xz - p0.xz;
             float2 v1 = p1.xz - p0.xz;
@@ -318,7 +311,7 @@ inline bool intersectTriangularPrism(Ray ray, float3 baseCenter, float side, flo
             }
         }
         float tBot = (baseCenter.y - ray.origin.y) / ray.direction.y;
-        if (tBot > 0.001f && tBot < tClosest) {
+        if (tBot > tMin && tBot < tClosest) {
             float3 p = ray.origin + ray.direction * tBot;
             float2 v0 = p2.xz - p0.xz;
             float2 v1 = p1.xz - p0.xz;
@@ -380,7 +373,6 @@ inline bool intersectTriangle(
     return true;
 }
 
-// Linear GPU BVH traversal using a fixed 64-depth stack with near-child sorting and interval bounds [tMin, tMax]
 inline bool intersectTeapotBVHInterval(
     Ray ray,
     device const GPUBVHNode *nodes,
@@ -393,8 +385,8 @@ inline bool intersectTeapotBVHInterval(
 ) {
     if (numNodes == 0) return false;
 
-    // Linear BVH traversal using a fixed 64-depth stack
-    int stack[64];
+    constexpr int kStackSize = 64;
+    int stack[kStackSize];
     int stackPtr = 0;
     stack[stackPtr++] = 0;
 
@@ -431,7 +423,8 @@ inline bool intersectTeapotBVHInterval(
             bool hitL = intersectBoxFast(ray, nodes[node.leftChild].bmin.xyz, nodes[node.leftChild].bmax.xyz, tNearL);
             bool hitR = intersectBoxFast(ray, nodes[node.rightChild].bmin.xyz, nodes[node.rightChild].bmax.xyz, tNearR);
 
-            if (hitL && hitR) {
+            if (hitL && hitR && stackPtr + 2 <= kStackSize) {
+                // Push the far child first so the near one pops next.
                 if (tNearL < tNearR) {
                     stack[stackPtr++] = node.rightChild;
                     stack[stackPtr++] = node.leftChild;
@@ -439,9 +432,9 @@ inline bool intersectTeapotBVHInterval(
                     stack[stackPtr++] = node.leftChild;
                     stack[stackPtr++] = node.rightChild;
                 }
-            } else if (hitL) {
+            } else if (hitL && stackPtr < kStackSize) {
                 stack[stackPtr++] = node.leftChild;
-            } else if (hitR) {
+            } else if (hitR && stackPtr < kStackSize) {
                 stack[stackPtr++] = node.rightChild;
             }
         }
@@ -485,7 +478,6 @@ inline HitRecord intersectSceneInterval(
     float t;
     float3 norm;
 
-    // Room boundaries
     if (abs(ray.direction.z) > 1e-5f) {
         t = (kRoomMaxZ - ray.origin.z) / ray.direction.z;
         if (t >= tMin && t < hit.distance) {
@@ -606,8 +598,8 @@ inline HitRecord intersectSceneInterval(
             hit.absorption = float3(0.04f, 0.04f, 0.04f);
         }
 
-        if (intersectSphere(ray, kSphereCenter, kSphereRadius, t, norm)) {
-            if (t >= tMin && t < hit.distance) {
+        if (intersectSphere(ray, kSphereCenter, kSphereRadius, tMin, t, norm)) {
+            if (t < hit.distance) {
                 hit.hit = true;
                 hit.distance = t;
                 hit.position = ray.origin + ray.direction * t;
@@ -622,8 +614,8 @@ inline HitRecord intersectSceneInterval(
             }
         }
 
-        if (intersectCylinder(ray, kCylinderCenter, kCylinderRadius, kCylinderHeight, t, norm)) {
-            if (t >= tMin && t < hit.distance) {
+        if (intersectCylinder(ray, kCylinderCenter, kCylinderRadius, kCylinderHeight, tMin, t, norm)) {
+            if (t < hit.distance) {
                 hit.hit = true;
                 hit.distance = t;
                 hit.position = ray.origin + ray.direction * t;
@@ -638,8 +630,8 @@ inline HitRecord intersectSceneInterval(
             }
         }
 
-        if (intersectTriangularPrism(ray, kPrismCenter, kPrismSide, kPrismHeight, t, norm)) {
-            if (t >= tMin && t < hit.distance) {
+        if (intersectTriangularPrism(ray, kPrismCenter, kPrismSide, kPrismHeight, tMin, t, norm)) {
+            if (t < hit.distance) {
                 hit.hit = true;
                 hit.distance = t;
                 hit.position = ray.origin + ray.direction * t;
@@ -656,8 +648,8 @@ inline HitRecord intersectSceneInterval(
 
         float3 slabMin = float3( 1.00f, 0.0f, 0.35f);
         float3 slabMax = float3( 1.70f, 0.06f, 1.05f);
-        if (intersectBox(ray, slabMin, slabMax, t, norm)) {
-            if (t >= tMin && t < hit.distance) {
+        if (intersectBox(ray, slabMin, slabMax, tMin, t, norm)) {
+            if (t < hit.distance) {
                 hit.hit = true;
                 hit.distance = t;
                 hit.position = ray.origin + ray.direction * t;
@@ -721,24 +713,6 @@ inline Basis makeTBN(float3 N) {
     return b;
 }
 
-inline float3 evaluateBRDF_GGX(float3 w_o, float3 w_i, float3 n, float alpha, float3 F0) {
-    float3 h = normalize(w_i + w_o);
-    float a2 = max(1e-4f, alpha * alpha);
-    float NdotH = max(0.0f, dot(n, h));
-    float denomD = (NdotH * NdotH * (a2 - 1.0f) + 1.0f);
-    float D = a2 / (kPi * denomD * denomD);
-
-    float NdotV = max(1e-4f, dot(n, w_o));
-    float NdotL = max(1e-4f, dot(n, w_i));
-
-    float3 F = F0 + (float3(1.0f) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
-
-    float k = a2 * 0.5f;
-    float G = 1.0f / ((NdotL * (1.0f - k) + k) * (NdotV * (1.0f - k) + k));
-
-    return F * (D * G * 0.25f);
-}
-
 constant uint kAtlasSurfaceWidth = 64;
 constant uint kAtlasSurfaceHeight = 64;
 constant uint kNumSurfaces = 5;
@@ -764,10 +738,8 @@ inline void getSurfaceGeometry(uint surfaceId, float2 uv, thread float3 &pos, th
     }
 }
 
-// =========================================================================
-// 3D Radiance Cascades Implementation (Alexander Sannikov)
-// 4 Cascades with bounded geometric range intervals and hierarchical merging
-// =========================================================================
+// Cascade N covers [kCascadeRanges[N], kCascadeRanges[N+1]] along a ray. The
+// intervals do not overlap, so a full hemisphere gather is the sum of the four.
 constant float kCascadeRanges[5] = { 0.005f, 0.25f, 0.80f, 2.50f, 100.0f };
 
 constant int kRaysC0 = 16;
@@ -814,7 +786,8 @@ inline float3 sampleIrradianceAtlas(
         return sampleSurfaceAtlas(4, u, v, irradianceAtlas);
     }
 
-    // 3D objects in the room (Teapot, sphere, cylinder, prism)
+    // Glass objects have no atlas slot of their own, so blend the five wall
+    // probes by how much of each the shading normal faces.
     float u_xz = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
     float v_xz = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
 
@@ -875,14 +848,41 @@ inline float4 traceCascadeInterval(
 
         float tNorm = clamp((hit.distance - tMin) / max(1e-4f, tMax - tMin), 0.0f, 1.0f);
         float boundaryFade = smoothstep(0.85f, 1.0f, tNorm);
-        return float4(hitRad, boundaryFade); // w is residual transmittance
+        return float4(hitRad, boundaryFade);
     }
     return float4(0.0f, 0.0f, 0.0f, 1.0f);
 }
 
+// Cosine-weighted Fibonacci direction `index` out of `count`, in the probe's
+// tangent frame. Cascade N+1 uses 2*count, so index 2i and 2i+1 are the two
+// directions that merge back into index i one level down.
+inline float3 cascadeDirection(Basis tbn, int index, int count, float jitter) {
+    float cosTheta = sqrt(max(0.0f, 1.0f - (float(index) + 0.5f) / float(count)));
+    float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+    float phi = float(index) * 2.399963229728f + jitter;
+    return tbn.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+}
+
+// Probes of cascade N sit at the centre of every `stride`-texel block, so
+// higher cascades are shared by progressively larger patches of the atlas.
+inline void cascadeProbe(uint surfaceId, uint lx, uint ly, int stride,
+                         thread float3 &origin, thread Basis &tbn) {
+    int bx = clamp(int(lx) / stride * stride, 0, int(kAtlasSurfaceWidth) - stride);
+    int by = clamp(int(ly) / stride * stride, 0, int(kAtlasSurfaceHeight) - stride);
+    float2 uv = (float2(bx, by) + float(stride) * 0.5f + 0.5f) / float(kAtlasSurfaceWidth);
+
+    float3 pos, nor;
+    getSurfaceGeometry(surfaceId, uv, pos, nor);
+    tbn = makeTBN(nor);
+    origin = pos + nor * 0.004f;
+}
+
+// One thread per atlas texel. The four cascades are evaluated as a depth-first
+// walk of the direction tree rather than four flat passes, which keeps the
+// whole merge in registers instead of spilling ~3 KB of per-thread arrays.
 kernel void computeRadianceCascadesKernel(
     uint2 tid [[thread_position_in_grid]],
-    texture2d<float, access::write> irradianceAtlas [[texture(0)]],
+    texture2d<float, access::read_write> irradianceAtlas [[texture(0)]],
     texture2d<float, access::sample> prevAtlas [[texture(1)]],
     constant GlassUniforms &uniforms [[buffer(0)]],
     device const GPUBVHNode *bvhNodes [[buffer(1)]],
@@ -895,125 +895,78 @@ kernel void computeRadianceCascadesKernel(
     uint ly = tid.y;
 
     float3 sunDir = normalize(uniforms.sunDirection);
-    float jitter = fract(sin(dot(float2(lx, ly) + float2(surfaceId * 37.0f), float2(12.9898f, 78.233f))) * 43758.5453f) * (2.0f * kPi);
-    const float kSurfaceRes = float(kAtlasSurfaceWidth);
+    float jitter = fract(sin(dot(float2(lx, ly) + float2(surfaceId * 37.0f),
+                                float2(12.9898f, 78.233f))) * 43758.5453f) * (2.0f * kPi);
 
-    // ---------------------------------------------------------------------
-    // 1. Cascade 3 (Far field: [2.50, 100.0] meters, 128 directions)
-    // Coarse spatial probe grid (stride 8 -> 8x8 probes per surface)
-    // ---------------------------------------------------------------------
-    int bx3 = clamp(int(lx) / 8 * 8, 0, int(kAtlasSurfaceWidth) - 8);
-    int by3 = clamp(int(ly) / 8 * 8, 0, int(kAtlasSurfaceHeight) - 8);
-    float2 uvC3 = (float2(bx3 + 4, by3 + 4) + 0.5f) / kSurfaceRes;
-    float3 probePosC3, probeNorC3;
-    getSurfaceGeometry(surfaceId, uvC3, probePosC3, probeNorC3);
-    Basis tbnC3 = makeTBN(probeNorC3);
-    float3 rayOriginC3 = probePosC3 + probeNorC3 * 0.004f;
+    float3 originC0, originC1, originC2, originC3;
+    Basis tbnC0, tbnC1, tbnC2, tbnC3;
+    cascadeProbe(surfaceId, lx, ly, 1, originC0, tbnC0);
+    cascadeProbe(surfaceId, lx, ly, 2, originC1, tbnC1);
+    cascadeProbe(surfaceId, lx, ly, 4, originC2, tbnC2);
+    cascadeProbe(surfaceId, lx, ly, 8, originC3, tbnC3);
 
-    float3 c3_rad[128];
-    for (int i = 0; i < kRaysC3; i++) {
-        float cosTheta = sqrt(max(0.0f, 1.0f - (float(i) + 0.5f) / float(kRaysC3)));
-        float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
-        float phi = float(i) * 2.399963229728f + jitter;
-        float3 dir = tbnC3.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
-
-        float4 res = traceCascadeInterval(rayOriginC3, dir, kCascadeRanges[3], kCascadeRanges[4],
-                                          sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes,
-                                          bvhNodes, triangles, prevAtlas);
-        if (res.w > 0.0f) {
-            c3_rad[i] = res.xyz + res.w * getSkyRadiance(dir, sunDir);
-        } else {
-            c3_rad[i] = res.xyz;
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // 2. Cascade 2 (Mid-to-far field: [0.80, 2.50] meters, 64 directions)
-    // Mid spatial probe grid (stride 4 -> 16x16 probes per surface)
-    // Hierarchically merges radiance from Cascade 3
-    // ---------------------------------------------------------------------
-    int bx2 = clamp(int(lx) / 4 * 4, 0, int(kAtlasSurfaceWidth) - 4);
-    int by2 = clamp(int(ly) / 4 * 4, 0, int(kAtlasSurfaceHeight) - 4);
-    float2 uvC2 = (float2(bx2 + 2, by2 + 2) + 0.5f) / kSurfaceRes;
-    float3 probePosC2, probeNorC2;
-    getSurfaceGeometry(surfaceId, uvC2, probePosC2, probeNorC2);
-    Basis tbnC2 = makeTBN(probeNorC2);
-    float3 rayOriginC2 = probePosC2 + probeNorC2 * 0.004f;
-
-    float3 c2_rad[64];
-    for (int i = 0; i < kRaysC2; i++) {
-        float cosTheta = sqrt(max(0.0f, 1.0f - (float(i) + 0.5f) / float(kRaysC2)));
-        float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
-        float phi = float(i) * 2.399963229728f + jitter;
-        float3 dir = tbnC2.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
-
-        float4 res = traceCascadeInterval(rayOriginC2, dir, kCascadeRanges[2], kCascadeRanges[3],
-                                          sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes,
-                                          bvhNodes, triangles, prevAtlas);
-        float3 incomingC3 = 0.5f * (c3_rad[2 * i] + c3_rad[2 * i + 1]);
-        c2_rad[i] = res.xyz + res.w * incomingC3;
-    }
-
-    // ---------------------------------------------------------------------
-    // 3. Cascade 1 (Near-to-mid field: [0.25, 0.80] meters, 32 directions)
-    // Fine-mid spatial probe grid (stride 2 -> 32x32 probes per surface)
-    // Hierarchically merges radiance from Cascade 2
-    // ---------------------------------------------------------------------
-    int bx1 = clamp(int(lx) / 2 * 2, 0, int(kAtlasSurfaceWidth) - 2);
-    int by1 = clamp(int(ly) / 2 * 2, 0, int(kAtlasSurfaceHeight) - 2);
-    float2 uvC1 = (float2(bx1 + 1, by1 + 1) + 0.5f) / kSurfaceRes;
-    float3 probePosC1, probeNorC1;
-    getSurfaceGeometry(surfaceId, uvC1, probePosC1, probeNorC1);
-    Basis tbnC1 = makeTBN(probeNorC1);
-    float3 rayOriginC1 = probePosC1 + probeNorC1 * 0.004f;
-
-    float3 c1_rad[32];
-    for (int i = 0; i < kRaysC1; i++) {
-        float cosTheta = sqrt(max(0.0f, 1.0f - (float(i) + 0.5f) / float(kRaysC1)));
-        float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
-        float phi = float(i) * 2.399963229728f + jitter;
-        float3 dir = tbnC1.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
-
-        float4 res = traceCascadeInterval(rayOriginC1, dir, kCascadeRanges[1], kCascadeRanges[2],
-                                          sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes,
-                                          bvhNodes, triangles, prevAtlas);
-        float3 incomingC2 = 0.5f * (c2_rad[2 * i] + c2_rad[2 * i + 1]);
-        c1_rad[i] = res.xyz + res.w * incomingC2;
-    }
-
-    // ---------------------------------------------------------------------
-    // 4. Cascade 0 (Contact field: [0.005, 0.25] meters, 16 directions)
-    // Full resolution probe grid (stride 1 -> 64x64 probes per surface)
-    // Hierarchically merges radiance from Cascade 1 & integrates irradiance
-    // ---------------------------------------------------------------------
-    float2 uvC0 = (float2(lx, ly) + 0.5f) / kSurfaceRes;
-    float3 probePosC0, probeNorC0;
-    getSurfaceGeometry(surfaceId, uvC0, probePosC0, probeNorC0);
-    Basis tbnC0 = makeTBN(probeNorC0);
-    float3 rayOriginC0 = probePosC0 + probeNorC0 * 0.004f;
-
-    float3 c0_rad[16];
     float3 accumIrradiance = float3(0.0f);
 
-    for (int i = 0; i < kRaysC0; i++) {
-        float cosTheta = sqrt(max(0.0f, 1.0f - (float(i) + 0.5f) / float(kRaysC0)));
-        float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
-        float phi = float(i) * 2.399963229728f + jitter;
-        float3 dir = tbnC0.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+    for (int i0 = 0; i0 < kRaysC0; i0++) {
+        float3 dir0 = cascadeDirection(tbnC0, i0, kRaysC0, jitter);
+        float4 seg0 = traceCascadeInterval(originC0, dir0, kCascadeRanges[0], kCascadeRanges[1],
+                                           sunDir, uniforms.sunColor, uniforms.sunIntensity,
+                                           uniforms.numTeapotNodes, bvhNodes, triangles, prevAtlas);
+        if (seg0.w <= 0.0f) {
+            accumIrradiance += seg0.xyz;
+            continue;
+        }
 
-        float4 res = traceCascadeInterval(rayOriginC0, dir, kCascadeRanges[0], kCascadeRanges[1],
-                                          sunDir, uniforms.sunColor, uniforms.sunIntensity, uniforms.numTeapotNodes,
-                                          bvhNodes, triangles, prevAtlas);
-        float3 incomingC1 = 0.5f * (c1_rad[2 * i] + c1_rad[2 * i + 1]);
-        c0_rad[i] = res.xyz + res.w * incomingC1;
+        float3 fromC1 = float3(0.0f);
+        for (int a = 0; a < 2; a++) {
+            int i1 = 2 * i0 + a;
+            float3 dir1 = cascadeDirection(tbnC1, i1, kRaysC1, jitter);
+            float4 seg1 = traceCascadeInterval(originC1, dir1, kCascadeRanges[1], kCascadeRanges[2],
+                                               sunDir, uniforms.sunColor, uniforms.sunIntensity,
+                                               uniforms.numTeapotNodes, bvhNodes, triangles, prevAtlas);
+            if (seg1.w <= 0.0f) {
+                fromC1 += 0.5f * seg1.xyz;
+                continue;
+            }
 
-        accumIrradiance += c0_rad[i];
+            float3 fromC2 = float3(0.0f);
+            for (int b = 0; b < 2; b++) {
+                int i2 = 2 * i1 + b;
+                float3 dir2 = cascadeDirection(tbnC2, i2, kRaysC2, jitter);
+                float4 seg2 = traceCascadeInterval(originC2, dir2, kCascadeRanges[2], kCascadeRanges[3],
+                                                   sunDir, uniforms.sunColor, uniforms.sunIntensity,
+                                                   uniforms.numTeapotNodes, bvhNodes, triangles, prevAtlas);
+                if (seg2.w <= 0.0f) {
+                    fromC2 += 0.5f * seg2.xyz;
+                    continue;
+                }
+
+                float3 fromC3 = float3(0.0f);
+                for (int c = 0; c < 2; c++) {
+                    int i3 = 2 * i2 + c;
+                    float3 dir3 = cascadeDirection(tbnC3, i3, kRaysC3, jitter);
+                    float4 seg3 = traceCascadeInterval(originC3, dir3, kCascadeRanges[3], kCascadeRanges[4],
+                                                       sunDir, uniforms.sunColor, uniforms.sunIntensity,
+                                                       uniforms.numTeapotNodes, bvhNodes, triangles, prevAtlas);
+                    // Nothing left to merge past the last cascade, so the
+                    // residual transmittance picks up the sky.
+                    fromC3 += 0.5f * (seg3.xyz + seg3.w * getSkyRadiance(dir3, sunDir));
+                }
+                fromC2 += 0.5f * (seg2.xyz + seg2.w * fromC3);
+            }
+            fromC1 += 0.5f * (seg1.xyz + seg1.w * fromC2);
+        }
+        accumIrradiance += seg0.xyz + seg0.w * fromC1;
     }
 
     float3 newIrradiance = accumIrradiance / float(kRaysC0);
-    float3 prevVal = prevAtlas.read(tid).rgb;
-    float3 finalIrradiance = (uniforms.frameIndex > 1) ? mix(newIrradiance, prevVal, 0.70f) : newIrradiance;
-    irradianceAtlas.write(float4(finalIrradiance, 1.0f), tid);
+
+    // Blend against the unfiltered history. Feeding the blurred atlas back in
+    // would re-apply the spatial filter every frame and creep towards mush.
+    if (uniforms.frameIndex > 1) {
+        newIrradiance = mix(newIrradiance, irradianceAtlas.read(tid).rgb, 0.70f);
+    }
+    irradianceAtlas.write(float4(newIrradiance, 1.0f), tid);
 }
 
 kernel void filterIrradianceAtlasKernel(
@@ -1110,6 +1063,54 @@ inline float3 toneMapACES(float3 x) {
     return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
 }
 
+// Photon flux is accumulated in fixed point so the splat can be atomic.
+constant float kFluxFixedScale = 1000000000.0f;
+
+// Bilinear splat of a single channel's flux into the floor accumulation buffer.
+inline void splatFlux(device atomic_uint *buffer, float2 floorUV, uint channel, float flux) {
+    float gx = floorUV.x * float(kCausticRes) - 0.5f;
+    float gy = floorUV.y * float(kCausticRes) - 0.5f;
+    int x0 = int(floor(gx));
+    int y0 = int(floor(gy));
+    float fx = gx - float(x0);
+    float fy = gy - float(y0);
+
+    float weights[4] = { (1.0f - fx) * (1.0f - fy), fx * (1.0f - fy),
+                         (1.0f - fx) * fy,          fx * fy };
+
+    for (int k = 0; k < 4; k++) {
+        int x = x0 + (k & 1);
+        int y = y0 + (k >> 1);
+        if (x < 0 || y < 0 || x >= int(kCausticRes) || y >= int(kCausticRes)) continue;
+        uint idx = (uint(y) * kCausticRes + uint(x)) * 4u + channel;
+        atomic_fetch_add_explicit(&buffer[idx], uint(flux * weights[k] * kFluxFixedScale), memory_order_relaxed);
+    }
+}
+
+// Continues an exit ray down to the floor plane; false if it misses the slab.
+inline bool hitFloorUV(float3 origin, float3 dir, thread float2 &floorUV) {
+    if (dir.y >= -1e-4f) return false;
+    float t = -origin.y / dir.y;
+    if (t <= 0.0f) return false;
+
+    float3 p = origin + dir * t;
+    if (p.x < kFloorMinX || p.x > kFloorMaxX || p.z < kFloorMinZ || p.z > kFloorMaxZ) return false;
+
+    floorUV = float2((p.x - kFloorMinX) / (kFloorMaxX - kFloorMinX),
+                     (p.z - kFloorMinZ) / (kFloorMaxZ - kFloorMinZ));
+    return true;
+}
+
+// Snell exit from inside a dielectric. N must already point into the medium.
+inline bool exitRefract(float3 incident, float3 N, float ior, float cosInside, thread float3 &outDir) {
+    float sin2Out = (1.0f - cosInside * cosInside) * (ior * ior);
+    if (sin2Out >= 1.0f) return false;
+    outDir = ior * incident - (ior * cosInside - sqrt(1.0f - sin2Out)) * N;
+    return true;
+}
+
+// One photon per thread. The 2048x2048 grid is split into four 1024x1024
+// quadrants, one per glass object, so all four share a single dispatch.
 kernel void generateCausticsKernel(
     uint2 tid [[thread_position_in_grid]],
     device atomic_uint *causticBuffer [[buffer(0)]],
@@ -1119,25 +1120,19 @@ kernel void generateCausticsKernel(
 ) {
     if (tid.x >= 2048 || tid.y >= 2048) return;
 
-    uint qX = tid.x / 1024;
-    uint qY = tid.y / 1024;
-    uint quadrant = qX + qY * 2;
-
-    uint lx = tid.x % 1024;
-    uint ly = tid.y % 1024;
-    float2 uv = (float2(lx, ly) + 0.5f) / 1024.0f;
+    uint quadrant = (tid.x / 1024) + (tid.y / 1024) * 2;
+    float2 uv = (float2(tid.x % 1024, tid.y % 1024) + 0.5f) / 1024.0f;
 
     float3 L = normalize(uniforms.sunDirection);
     float3 lightDir = -L;
 
+    // Emitter disc basis, perpendicular to the sun.
     float3 up = abs(L.y) < 0.99f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
     float3 uAxis = normalize(cross(L, up));
     float3 vAxis = cross(L, uAxis);
 
-    const float kFixedScale = 1000000000.0f;
-
-    // Quadrant 0: Sphere analytical caustics
     if (quadrant == 0) {
+        // Sphere: entry and exit are both analytic, so no tracing is needed.
         float sx = (uv.x - 0.5f) * (2.0f * kSphereRadius);
         float sy = (uv.y - 0.5f) * (2.0f * kSphereRadius);
         float s2 = sx * sx + sy * sy;
@@ -1147,98 +1142,53 @@ kernel void generateCausticsKernel(
         float3 P1 = kSphereCenter + sx * uAxis + sy * vAxis + sz * L;
         float3 N1 = (P1 - kSphereCenter) / kSphereRadius;
 
-        float cosTheta1 = clamp(-dot(lightDir, N1), 0.0f, 1.0f);
+        float cosEntry = clamp(-dot(lightDir, N1), 0.0f, 1.0f);
         float rayWeight = (4.0f * kSphereRadius * kSphereRadius / float(1024 * 1024)) * uniforms.sunIntensity;
 
-        float disp = (uniforms.renderMode == 3) ? (0.040f * 1.5f) : 0.025f;
-        float iorR = 1.62f - disp;
-        float iorG = 1.62f;
-        float iorB = 1.62f + disp;
-        float3 iors = float3(iorR, iorG, iorB);
+        // Matches the sphere's scene material (ior 1.62, dispersion 0.040).
+        float disp = (uniforms.renderMode == 3) ? 0.060f : 0.040f;
+        float3 iors = 1.62f + float3(-disp, 0.0f, disp);
 
-        for (int ch = 0; ch < 3; ch++) {
+        for (uint ch = 0; ch < 3; ch++) {
             float eta = iors[ch];
 
-            float sin2Theta2 = (1.0f - cosTheta1 * cosTheta1) / (eta * eta);
-            if (sin2Theta2 >= 1.0f) continue;
-            float cosTheta2 = sqrt(1.0f - sin2Theta2);
+            float sin2Inside = (1.0f - cosEntry * cosEntry) / (eta * eta);
+            if (sin2Inside >= 1.0f) continue;
+            float cosInside = sqrt(1.0f - sin2Inside);
 
-            float3 D1 = (lightDir / eta) + (cosTheta1 / eta - cosTheta2) * N1;
-            float T_entry = 1.0f - dielectricFresnel(cosTheta1, 1.0f, eta);
-
-            float internalDist = 2.0f * kSphereRadius * cosTheta2;
+            float3 D1 = (lightDir / eta) + (cosEntry / eta - cosInside) * N1;
+            float internalDist = 2.0f * kSphereRadius * cosInside;
             float3 P2 = P1 + D1 * internalDist;
             float3 N2 = (P2 - kSphereCenter) / kSphereRadius;
 
-            float absorption = exp(-0.02f * internalDist);
+            float cosExit = clamp(dot(D1, N2), 0.0f, 1.0f);
+            float3 D2;
+            if (!exitRefract(D1, N2, eta, cosExit, D2)) continue;
 
-            float cosTheta3 = clamp(dot(D1, N2), 0.0f, 1.0f);
-            float sin2Theta4 = (1.0f - cosTheta3 * cosTheta3) * (eta * eta);
-            if (sin2Theta4 >= 1.0f) continue;
-            float cosTheta4 = sqrt(1.0f - sin2Theta4);
+            float2 floorUV;
+            if (!hitFloorUV(P2, D2, floorUV)) continue;
 
-            float3 D2 = eta * D1 - (eta * cosTheta3 - cosTheta4) * N2;
-            float T_exit = 1.0f - dielectricFresnel(cosTheta3, eta, 1.0f);
-
-            float flux = rayWeight * T_entry * T_exit * absorption * uniforms.sunColor[ch];
-
-            if (D2.y < -1e-4f) {
-                float tFloor = -P2.y / D2.y;
-                if (tFloor > 0.0f) {
-                    float3 hitFloor = P2 + D2 * tFloor;
-                    if (hitFloor.x >= kFloorMinX && hitFloor.x <= kFloorMaxX &&
-                        hitFloor.z >= kFloorMinZ && hitFloor.z <= kFloorMaxZ) {
-
-                        float uNorm = (hitFloor.x - kFloorMinX) / (kFloorMaxX - kFloorMinX);
-                        float vNorm = (hitFloor.z - kFloorMinZ) / (kFloorMaxZ - kFloorMinZ);
-
-                        float gx = uNorm * float(kCausticRes) - 0.5f;
-                        float gy = vNorm * float(kCausticRes) - 0.5f;
-
-                        int x0 = int(floor(gx));
-                        int y0 = int(floor(gy));
-                        float fx = gx - float(x0);
-                        float fy = gy - float(y0);
-
-                        float w00 = (1.0f - fx) * (1.0f - fy);
-                        float w10 = fx * (1.0f - fy);
-                        float w01 = (1.0f - fx) * fy;
-                        float w11 = fx * fy;
-
-                        if (x0 >= 0 && x0 < int(kCausticRes) && y0 >= 0 && y0 < int(kCausticRes)) {
-                            uint idx = (uint(y0) * kCausticRes + uint(x0)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w00 * kFixedScale), memory_order_relaxed);
-                        }
-                        if (x0 + 1 >= 0 && x0 + 1 < int(kCausticRes) && y0 >= 0 && y0 < int(kCausticRes)) {
-                            uint idx = (uint(y0) * kCausticRes + uint(x0 + 1)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w10 * kFixedScale), memory_order_relaxed);
-                        }
-                        if (x0 >= 0 && x0 < int(kCausticRes) && y0 + 1 >= 0 && y0 + 1 < int(kCausticRes)) {
-                            uint idx = (uint(y0 + 1) * kCausticRes + uint(x0)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w01 * kFixedScale), memory_order_relaxed);
-                        }
-                        if (x0 + 1 >= 0 && x0 + 1 < int(kCausticRes) && y0 + 1 >= 0 && y0 + 1 < int(kCausticRes)) {
-                            uint idx = (uint(y0 + 1) * kCausticRes + uint(x0 + 1)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w11 * kFixedScale), memory_order_relaxed);
-                        }
-                    }
-                }
-            }
+            float flux = rayWeight * uniforms.sunColor[ch]
+                       * (1.0f - dielectricFresnel(cosEntry, 1.0f, eta))
+                       * (1.0f - dielectricFresnel(cosExit, eta, 1.0f))
+                       * exp(-0.02f * internalDist);
+            splatFlux(causticBuffer, floorUV, ch, flux);
         }
         return;
     }
 
-    // Quadrant 1: Utah Teapot mesh caustics via BVH
     if (quadrant == 1) {
+        // Teapot: two BVH queries, one for the entry hull and one for the exit.
         if (uniforms.numTeapotNodes == 0) return;
-        float objRadius = 0.48f;
+
+        // Covers the mesh's XZ diagonal (bounds are +-0.664 x +-0.413).
+        const float objRadius = 0.78f;
         float sx = (uv.x - 0.5f) * (2.0f * objRadius);
         float sy = (uv.y - 0.5f) * (2.0f * objRadius);
         if (sx * sx + sy * sy > objRadius * objRadius) return;
 
-        float3 rayOrigin = float3(0.0f, 0.30f, 0.0f) + sx * uAxis + sy * vAxis - lightDir * 3.5f;
         Ray photonRay;
-        photonRay.origin = rayOrigin;
+        photonRay.origin = float3(0.0f, 0.325f, 0.0f) + sx * uAxis + sy * vAxis - lightDir * 3.5f;
         photonRay.direction = lightDir;
 
         float tEntry;
@@ -1246,15 +1196,12 @@ kernel void generateCausticsKernel(
         if (!intersectTeapotBVH(photonRay, bvhNodes, triangles, uniforms.numTeapotNodes, tEntry, nEntry)) return;
 
         float3 P1 = photonRay.origin + photonRay.direction * tEntry;
-        float3 N1 = nEntry;
-        float cosTheta1 = clamp(-dot(lightDir, N1), 0.0f, 1.0f);
-
+        float cosEntry = clamp(-dot(lightDir, nEntry), 0.0f, 1.0f);
         float rayWeight = (4.0f * objRadius * objRadius / float(1024 * 1024)) * uniforms.sunIntensity;
 
-        float objIor = 1.52f;
+        const float objIor = 1.52f;
         float3 D1;
-        if (!refractRay(lightDir, N1, 1.0f / objIor, D1)) return;
-        float T_entry = 1.0f - dielectricFresnel(cosTheta1, 1.0f, objIor);
+        if (!refractRay(lightDir, nEntry, 1.0f / objIor, D1)) return;
 
         Ray insideRay;
         insideRay.origin = P1 + D1 * 0.005f;
@@ -1265,100 +1212,52 @@ kernel void generateCausticsKernel(
         if (!intersectTeapotBVH(insideRay, bvhNodes, triangles, uniforms.numTeapotNodes, tExit, nExit)) return;
         if (tExit < 0.002f) return;
 
-        float internalDist = tExit;
         float3 P2 = insideRay.origin + insideRay.direction * tExit;
         float3 N2 = -nExit;
-        float cosTheta3 = clamp(dot(D1, N2), 0.0f, 1.0f);
-        float T_exit = 1.0f - dielectricFresnel(cosTheta3, objIor, 1.0f);
+        float cosExit = clamp(dot(D1, N2), 0.0f, 1.0f);
 
-        float3 absorption = beerLambertAbsorption(float3(0.05f), internalDist);
-        float3 baseFlux = rayWeight * T_entry * T_exit * absorption * uniforms.sunColor;
+        float3 baseFlux = rayWeight * uniforms.sunColor
+                        * (1.0f - dielectricFresnel(cosEntry, 1.0f, objIor))
+                        * (1.0f - dielectricFresnel(cosExit, objIor, 1.0f))
+                        * beerLambertAbsorption(float3(0.04f), tExit);
 
-        float disp = (uniforms.renderMode == 3) ? (0.025f * 1.5f) : 0.0f;
-        float iors[3] = { objIor - disp, objIor, objIor + disp };
+        float disp = (uniforms.renderMode == 3) ? 0.0375f : 0.0f;
+        float3 iors = objIor + float3(-disp, 0.0f, disp);
 
-        for (int ch = 0; ch < 3; ch++) {
-            float eta = iors[ch];
-            float sin2Theta4 = (1.0f - cosTheta3 * cosTheta3) * (eta * eta);
-            if (sin2Theta4 >= 1.0f) continue;
-            float cosTheta4 = sqrt(1.0f - sin2Theta4);
-            float3 D2 = eta * D1 - (eta * cosTheta3 - cosTheta4) * N2;
+        for (uint ch = 0; ch < 3; ch++) {
+            float3 D2;
+            if (!exitRefract(D1, N2, iors[ch], cosExit, D2)) continue;
 
-            if (D2.y < -1e-4f) {
-                float tFloor = -P2.y / D2.y;
-                if (tFloor > 0.0f) {
-                    float3 hitFloor = P2 + D2 * tFloor;
-                    if (hitFloor.x >= kFloorMinX && hitFloor.x <= kFloorMaxX &&
-                        hitFloor.z >= kFloorMinZ && hitFloor.z <= kFloorMaxZ) {
-
-                        float uNorm = (hitFloor.x - kFloorMinX) / (kFloorMaxX - kFloorMinX);
-                        float vNorm = (hitFloor.z - kFloorMinZ) / (kFloorMaxZ - kFloorMinZ);
-
-                        float gx = uNorm * float(kCausticRes) - 0.5f;
-                        float gy = vNorm * float(kCausticRes) - 0.5f;
-
-                        int x0 = int(floor(gx));
-                        int y0 = int(floor(gy));
-                        float fx = gx - float(x0);
-                        float fy = gy - float(y0);
-
-                        float w00 = (1.0f - fx) * (1.0f - fy);
-                        float w10 = fx * (1.0f - fy);
-                        float w01 = (1.0f - fx) * fy;
-                        float w11 = fx * fy;
-
-                        float flux = baseFlux[ch];
-
-                        if (x0 >= 0 && x0 < int(kCausticRes) && y0 >= 0 && y0 < int(kCausticRes)) {
-                            uint idx = (uint(y0) * kCausticRes + uint(x0)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w00 * kFixedScale), memory_order_relaxed);
-                        }
-                        if (x0 + 1 >= 0 && x0 + 1 < int(kCausticRes) && y0 >= 0 && y0 < int(kCausticRes)) {
-                            uint idx = (uint(y0) * kCausticRes + uint(x0 + 1)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w10 * kFixedScale), memory_order_relaxed);
-                        }
-                        if (x0 >= 0 && x0 < int(kCausticRes) && y0 + 1 >= 0 && y0 + 1 < int(kCausticRes)) {
-                            uint idx = (uint(y0 + 1) * kCausticRes + uint(x0)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w01 * kFixedScale), memory_order_relaxed);
-                        }
-                        if (x0 + 1 >= 0 && x0 + 1 < int(kCausticRes) && y0 + 1 >= 0 && y0 + 1 < int(kCausticRes)) {
-                            uint idx = (uint(y0 + 1) * kCausticRes + uint(x0 + 1)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w11 * kFixedScale), memory_order_relaxed);
-                        }
-                    }
-                }
-            }
+            float2 floorUV;
+            if (!hitFloorUV(P2, D2, floorUV)) continue;
+            splatFlux(causticBuffer, floorUV, ch, baseFlux[ch]);
         }
         return;
     }
 
-    // Quadrant 2: Cylinder analytical caustics
     if (quadrant == 2) {
-        float objRadius = kCylinderRadius * 1.15f;
+        // Cylinder: strongly absorbing, so the caustic is tinted magenta.
+        const float objRadius = kCylinderRadius * 1.15f;
         float sx = (uv.x - 0.5f) * (2.0f * objRadius);
         float sy = (uv.y - 0.5f) * (2.0f * objRadius);
         if (sx * sx + sy * sy > objRadius * objRadius) return;
 
         float3 cylCenter = kCylinderCenter + float3(0.0f, kCylinderHeight * 0.5f, 0.0f);
-        float3 rayOrigin = cylCenter + sx * uAxis + sy * vAxis - lightDir * 3.5f;
         Ray photonRay;
-        photonRay.origin = rayOrigin;
+        photonRay.origin = cylCenter + sx * uAxis + sy * vAxis - lightDir * 3.5f;
         photonRay.direction = lightDir;
 
         float tEntry;
         float3 nEntry;
-        if (!intersectCylinder(photonRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, tEntry, nEntry)) return;
+        if (!intersectCylinder(photonRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, 0.001f, tEntry, nEntry)) return;
 
         float3 P1 = photonRay.origin + photonRay.direction * tEntry;
-        float3 N1 = nEntry;
-        float cosTheta1 = clamp(-dot(lightDir, N1), 0.0f, 1.0f);
-
+        float cosEntry = clamp(-dot(lightDir, nEntry), 0.0f, 1.0f);
         float rayWeight = (4.0f * objRadius * objRadius / float(1024 * 1024)) * uniforms.sunIntensity;
 
-        float objIor = 1.50f;
+        const float objIor = 1.50f;
         float3 D1;
-        if (!refractRay(lightDir, N1, 1.0f / objIor, D1)) return;
-        float T_entry = 1.0f - dielectricFresnel(cosTheta1, 1.0f, objIor);
+        if (!refractRay(lightDir, nEntry, 1.0f / objIor, D1)) return;
 
         Ray insideRay;
         insideRay.origin = P1 + D1 * 0.005f;
@@ -1366,103 +1265,56 @@ kernel void generateCausticsKernel(
 
         float tExit;
         float3 nExit;
-        if (!intersectCylinder(insideRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, tExit, nExit)) return;
+        if (!intersectCylinder(insideRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, 0.001f, tExit, nExit)) return;
         if (tExit < 0.002f) return;
 
-        float internalDist = tExit;
         float3 P2 = insideRay.origin + insideRay.direction * tExit;
         float3 N2 = -nExit;
-        float cosTheta3 = clamp(dot(D1, N2), 0.0f, 1.0f);
-        float T_exit = 1.0f - dielectricFresnel(cosTheta3, objIor, 1.0f);
+        float cosExit = clamp(dot(D1, N2), 0.0f, 1.0f);
 
-        float3 absorption = beerLambertAbsorption(float3(1.2f, 0.15f, 0.9f) * 2.2f, internalDist);
-        float3 baseFlux = rayWeight * T_entry * T_exit * absorption * uniforms.sunColor;
+        float3 D2;
+        if (!exitRefract(D1, N2, objIor, cosExit, D2)) return;
 
-        float sin2Theta4 = (1.0f - cosTheta3 * cosTheta3) * (objIor * objIor);
-        if (sin2Theta4 >= 1.0f) return;
-        float cosTheta4 = sqrt(1.0f - sin2Theta4);
-        float3 D2 = objIor * D1 - (objIor * cosTheta3 - cosTheta4) * N2;
+        float2 floorUV;
+        if (!hitFloorUV(P2, D2, floorUV)) return;
 
-        if (D2.y < -1e-4f) {
-            float tFloor = -P2.y / D2.y;
-            if (tFloor > 0.0f) {
-                float3 hitFloor = P2 + D2 * tFloor;
-                if (hitFloor.x >= kFloorMinX && hitFloor.x <= kFloorMaxX &&
-                    hitFloor.z >= kFloorMinZ && hitFloor.z <= kFloorMaxZ) {
+        float3 flux = rayWeight * uniforms.sunColor
+                    * (1.0f - dielectricFresnel(cosEntry, 1.0f, objIor))
+                    * (1.0f - dielectricFresnel(cosExit, objIor, 1.0f))
+                    * beerLambertAbsorption(float3(1.2f, 0.15f, 0.9f) * 2.2f, tExit);
 
-                    float uNorm = (hitFloor.x - kFloorMinX) / (kFloorMaxX - kFloorMinX);
-                    float vNorm = (hitFloor.z - kFloorMinZ) / (kFloorMaxZ - kFloorMinZ);
-
-                    float gx = uNorm * float(kCausticRes) - 0.5f;
-                    float gy = vNorm * float(kCausticRes) - 0.5f;
-
-                    int x0 = int(floor(gx));
-                    int y0 = int(floor(gy));
-                    float fx = gx - float(x0);
-                    float fy = gy - float(y0);
-
-                    float w00 = (1.0f - fx) * (1.0f - fy);
-                    float w10 = fx * (1.0f - fy);
-                    float w01 = (1.0f - fx) * fy;
-                    float w11 = fx * fy;
-
-                    for (int ch = 0; ch < 3; ch++) {
-                        float flux = baseFlux[ch];
-                        if (x0 >= 0 && x0 < int(kCausticRes) && y0 >= 0 && y0 < int(kCausticRes)) {
-                            uint idx = (uint(y0) * kCausticRes + uint(x0)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w00 * kFixedScale), memory_order_relaxed);
-                        }
-                        if (x0 + 1 >= 0 && x0 + 1 < int(kCausticRes) && y0 >= 0 && y0 < int(kCausticRes)) {
-                            uint idx = (uint(y0) * kCausticRes + uint(x0 + 1)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w10 * kFixedScale), memory_order_relaxed);
-                        }
-                        if (x0 >= 0 && x0 < int(kCausticRes) && y0 + 1 >= 0 && y0 + 1 < int(kCausticRes)) {
-                            uint idx = (uint(y0 + 1) * kCausticRes + uint(x0)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w01 * kFixedScale), memory_order_relaxed);
-                        }
-                        if (x0 + 1 >= 0 && x0 + 1 < int(kCausticRes) && y0 + 1 >= 0 && y0 + 1 < int(kCausticRes)) {
-                            uint idx = (uint(y0 + 1) * kCausticRes + uint(x0 + 1)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w11 * kFixedScale), memory_order_relaxed);
-                        }
-                    }
-                }
-            }
-        }
+        for (uint ch = 0; ch < 3; ch++) splatFlux(causticBuffer, floorUV, ch, flux[ch]);
         return;
     }
 
-    // Quadrant 3: Triangular prism dispersion caustics
     {
-        float objRadius = kPrismSide * 0.75f;
+        // Prism: each wavelength refracts at its own angle on entry as well as
+        // exit, so the three channels have to be traced separately.
+        const float objRadius = kPrismSide * 0.75f;
         float sx = (uv.x - 0.5f) * (2.0f * objRadius);
         float sy = (uv.y - 0.5f) * (2.0f * objRadius);
         if (sx * sx + sy * sy > objRadius * objRadius) return;
 
         float3 prismCenter = kPrismCenter + float3(0.0f, kPrismHeight * 0.5f, 0.0f);
-        float3 rayOrigin = prismCenter + sx * uAxis + sy * vAxis - lightDir * 3.5f;
         Ray photonRay;
-        photonRay.origin = rayOrigin;
+        photonRay.origin = prismCenter + sx * uAxis + sy * vAxis - lightDir * 3.5f;
         photonRay.direction = lightDir;
 
         float tEntry;
         float3 nEntry;
-        if (!intersectTriangularPrism(photonRay, kPrismCenter, kPrismSide, kPrismHeight, tEntry, nEntry)) return;
+        if (!intersectTriangularPrism(photonRay, kPrismCenter, kPrismSide, kPrismHeight, 0.001f, tEntry, nEntry)) return;
 
         float3 P1 = photonRay.origin + photonRay.direction * tEntry;
-        float3 N1 = nEntry;
-        float cosTheta1 = clamp(-dot(lightDir, N1), 0.0f, 1.0f);
-
+        float cosEntry = clamp(-dot(lightDir, nEntry), 0.0f, 1.0f);
         float rayWeight = (4.0f * objRadius * objRadius / float(1024 * 1024)) * uniforms.sunIntensity;
 
-        float baseIor = 1.58f;
-        float prismDisp = 0.055f;
-        float iors[3] = { baseIor - prismDisp, baseIor, baseIor + prismDisp };
+        float3 iors = 1.58f + float3(-0.055f, 0.0f, 0.055f);
 
-        for (int ch = 0; ch < 3; ch++) {
+        for (uint ch = 0; ch < 3; ch++) {
             float eta = iors[ch];
+
             float3 D1;
-            if (!refractRay(lightDir, N1, 1.0f / eta, D1)) continue;
-            float T_entry = 1.0f - dielectricFresnel(cosTheta1, 1.0f, eta);
+            if (!refractRay(lightDir, nEntry, 1.0f / eta, D1)) continue;
 
             Ray insideRay;
             insideRay.origin = P1 + D1 * 0.005f;
@@ -1470,63 +1322,24 @@ kernel void generateCausticsKernel(
 
             float tExit;
             float3 nExit;
-            if (!intersectTriangularPrism(insideRay, kPrismCenter, kPrismSide, kPrismHeight, tExit, nExit)) continue;
+            if (!intersectTriangularPrism(insideRay, kPrismCenter, kPrismSide, kPrismHeight, 0.001f, tExit, nExit)) continue;
             if (tExit < 0.002f) continue;
 
             float3 P2 = insideRay.origin + insideRay.direction * tExit;
             float3 N2 = -nExit;
-            float cosTheta3 = clamp(dot(D1, N2), 0.0f, 1.0f);
+            float cosExit = clamp(dot(D1, N2), 0.0f, 1.0f);
 
-            float sin2Theta4 = (1.0f - cosTheta3 * cosTheta3) * (eta * eta);
-            if (sin2Theta4 >= 1.0f) continue;
-            float cosTheta4 = sqrt(1.0f - sin2Theta4);
-            float3 D2 = eta * D1 - (eta * cosTheta3 - cosTheta4) * N2;
-            float T_exit = 1.0f - dielectricFresnel(cosTheta3, eta, 1.0f);
+            float3 D2;
+            if (!exitRefract(D1, N2, eta, cosExit, D2)) continue;
 
-            float flux = rayWeight * T_entry * T_exit * uniforms.sunColor[ch] * 1.5f;
+            float2 floorUV;
+            if (!hitFloorUV(P2, D2, floorUV)) continue;
 
-            if (D2.y < -1e-4f) {
-                float tFloor = -P2.y / D2.y;
-                if (tFloor > 0.0f) {
-                    float3 hitFloor = P2 + D2 * tFloor;
-                    if (hitFloor.x >= kFloorMinX && hitFloor.x <= kFloorMaxX &&
-                        hitFloor.z >= kFloorMinZ && hitFloor.z <= kFloorMaxZ) {
-
-                        float uNorm = (hitFloor.x - kFloorMinX) / (kFloorMaxX - kFloorMinX);
-                        float vNorm = (hitFloor.z - kFloorMinZ) / (kFloorMaxZ - kFloorMinZ);
-
-                        float gx = uNorm * float(kCausticRes) - 0.5f;
-                        float gy = vNorm * float(kCausticRes) - 0.5f;
-
-                        int x0 = int(floor(gx));
-                        int y0 = int(floor(gy));
-                        float fx = gx - float(x0);
-                        float fy = gy - float(y0);
-
-                        float w00 = (1.0f - fx) * (1.0f - fy);
-                        float w10 = fx * (1.0f - fy);
-                        float w01 = (1.0f - fx) * fy;
-                        float w11 = fx * fy;
-
-                        if (x0 >= 0 && x0 < int(kCausticRes) && y0 >= 0 && y0 < int(kCausticRes)) {
-                            uint idx = (uint(y0) * kCausticRes + uint(x0)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w00 * kFixedScale), memory_order_relaxed);
-                        }
-                        if (x0 + 1 >= 0 && x0 + 1 < int(kCausticRes) && y0 >= 0 && y0 < int(kCausticRes)) {
-                            uint idx = (uint(y0) * kCausticRes + uint(x0 + 1)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w10 * kFixedScale), memory_order_relaxed);
-                        }
-                        if (x0 >= 0 && x0 < int(kCausticRes) && y0 + 1 >= 0 && y0 + 1 < int(kCausticRes)) {
-                            uint idx = (uint(y0 + 1) * kCausticRes + uint(x0)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w01 * kFixedScale), memory_order_relaxed);
-                        }
-                        if (x0 + 1 >= 0 && x0 + 1 < int(kCausticRes) && y0 + 1 >= 0 && y0 + 1 < int(kCausticRes)) {
-                            uint idx = (uint(y0 + 1) * kCausticRes + uint(x0 + 1)) * 4u + uint(ch);
-                            atomic_fetch_add_explicit(&causticBuffer[idx], uint(flux * w11 * kFixedScale), memory_order_relaxed);
-                        }
-                    }
-                }
-            }
+            // 1.5x compensates for splitting one photon across three narrow bands.
+            float flux = rayWeight * uniforms.sunColor[ch] * 1.5f
+                       * (1.0f - dielectricFresnel(cosEntry, 1.0f, eta))
+                       * (1.0f - dielectricFresnel(cosExit, eta, 1.0f));
+            splatFlux(causticBuffer, floorUV, ch, flux);
         }
     }
 }
@@ -1541,7 +1354,7 @@ kernel void filterCausticsKernel(
 
     float pixelArea = ((kFloorMaxX - kFloorMinX) / float(kCausticRes)) *
                       ((kFloorMaxZ - kFloorMinZ) / float(kCausticRes));
-    float invFixedPoint = 1.0f / (1000000000.0f * pixelArea);
+    float invFixedPoint = 1.0f / (kFluxFixedScale * pixelArea);
 
     if (uniforms.renderMode != 2) {
         uint baseIdx = (tid.y * kCausticRes + tid.x) * 4u;
@@ -1645,11 +1458,11 @@ kernel void renderSceneKernel(
                 if (primaryHit.objectId == 10) {
                     exitOk = intersectTeapotBVH(insideRay, bvhNodes, triangles, uniforms.numTeapotNodes, tExit, nExit);
                 } else if (primaryHit.objectId == 11) {
-                    exitOk = intersectSphere(insideRay, kSphereCenter, kSphereRadius, tExit, nExit);
+                    exitOk = intersectSphere(insideRay, kSphereCenter, kSphereRadius, 0.001f, tExit, nExit);
                 } else if (primaryHit.objectId == 12) {
-                    exitOk = intersectCylinder(insideRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, tExit, nExit);
+                    exitOk = intersectCylinder(insideRay, kCylinderCenter, kCylinderRadius, kCylinderHeight, 0.001f, tExit, nExit);
                 } else {
-                    exitOk = intersectTriangularPrism(insideRay, kPrismCenter, kPrismSide, kPrismHeight, tExit, nExit);
+                    exitOk = intersectTriangularPrism(insideRay, kPrismCenter, kPrismSide, kPrismHeight, 0.001f, tExit, nExit);
                 }
 
                 if (exitOk) {
@@ -1704,15 +1517,15 @@ kernel void renderSceneKernel(
                 if (primaryHit.objectId == 10) {
                     exitOk = intersectTeapotBVH(insideRayG, bvhNodes, triangles, uniforms.numTeapotNodes, tExit, nExit);
                 } else if (primaryHit.objectId == 11) {
-                    exitOk = intersectSphere(insideRayG, kSphereCenter, kSphereRadius, tExit, nExit);
+                    exitOk = intersectSphere(insideRayG, kSphereCenter, kSphereRadius, 0.001f, tExit, nExit);
                 } else if (primaryHit.objectId == 12) {
-                    exitOk = intersectCylinder(insideRayG, kCylinderCenter, kCylinderRadius, kCylinderHeight, tExit, nExit);
+                    exitOk = intersectCylinder(insideRayG, kCylinderCenter, kCylinderRadius, kCylinderHeight, 0.001f, tExit, nExit);
                 } else if (primaryHit.objectId == 13) {
-                    exitOk = intersectTriangularPrism(insideRayG, kPrismCenter, kPrismSide, kPrismHeight, tExit, nExit);
+                    exitOk = intersectTriangularPrism(insideRayG, kPrismCenter, kPrismSide, kPrismHeight, 0.001f, tExit, nExit);
                 } else {
                     float3 slabMin = float3(1.00f, 0.0f, 0.35f);
                     float3 slabMax = float3(1.70f, 0.06f, 1.05f);
-                    exitOk = intersectBox(insideRayG, slabMin, slabMax, tExit, nExit);
+                    exitOk = intersectBox(insideRayG, slabMin, slabMax, 0.001f, tExit, nExit);
                 }
 
                 if (exitOk) {
@@ -1734,14 +1547,14 @@ kernel void renderSceneKernel(
                         float3 uVec = normalize(cross(wT, upVec));
                         float3 vVec = cross(wT, uVec);
 
-                        // High-frequency per-pixel rotation using Interleaved Gradient Noise (IGN)
+                        // Per-pixel spiral rotation, otherwise the 16 taps line
+                        // up across neighbours and the cone bands visibly.
                         float3 ignMagic = float3(0.06711056f, 0.00583715f, 52.9829189f);
                         float ign = fract(ignMagic.z * fract(dot(float2(tid), ignMagic.xy)));
                         float phi = ign * 6.283185307f;
                         float cosPhi = cos(phi);
                         float sinPhi = sin(phi);
 
-                        // 16-sample Vogel's disk (golden ratio spiral) with Gaussian radial weighting
                         constexpr int kSamples = 16;
                         float3 accumRad = float3(0.0f);
                         float weightSum = 0.0f;
@@ -1750,7 +1563,6 @@ kernel void renderSceneKernel(
                             float theta = float(s) * 2.39996323f;
                             float r = sqrt((float(s) + 0.5f) / float(kSamples));
 
-                            // Rotated disc offset
                             float unrotX = r * cos(theta);
                             float unrotY = r * sin(theta);
                             float rotX = unrotX * cosPhi - unrotY * sinPhi;
@@ -1759,7 +1571,7 @@ kernel void renderSceneKernel(
                             float2 off = float2(rotX, rotY) * coneAngle;
                             float3 sampleDir = normalize(wT + off.x * uVec + off.y * vVec);
 
-                            // Smooth Gaussian-like weight to prevent harsh disc edges
+                            // Falls off towards the rim so the cone has no hard edge.
                             float weight = exp(-1.2f * r * r);
 
                             Ray coneRay;
