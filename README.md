@@ -50,6 +50,8 @@ The frame is five compute passes:
 4. **Caustic filter** - reads the integer buffer back into a float texture, with an extra roughness-driven blur in frosted mode.
 5. **Shading** - one primary ray per pixel. Glass gets a Fresnel-weighted split between one reflection ray and one refraction ray traced per channel (R/G/B use different IOR, which is what produces the coloured fringes).
 
+A sixth kernel, mode 4, is a brute-force path tracer over the same scene. It is not part of the frame - it is the ground truth the five passes above are measured against, and the measurements are in [Validation against a path traced reference](#validation-against-a-path-traced-reference).
+
 Dispersion uses a Cauchy-style split, $n(\lambda) = n_0 + B/\lambda^2$, collapsed to three fixed offsets rather than a real spectral sampling. Internal attenuation is Beer-Lambert, $I(d) = I_0 e^{-\alpha d}$. The teapot (6,320 triangles) sits in a 4,095-node linear BVH traversed with a 64-entry stack and near-child ordering; everything else in the scene is an analytic primitive.
 
 ---
@@ -66,6 +68,11 @@ Dispersion uses a Cauchy-style split, $n(\lambda) = n_0 + B/\lambda^2$, collapse
 | ![Dispersion](media/3_Spectral_Dispersion.png) | ![Whitted Baseline](media/4_Whitted_Baseline.png) |
 | *Amplified spectral separation on prism & crystal sphere* | *Classical binary shadow ray (zero caustics, dark shadow)* |
 
+| Mode 4: Path Traced Reference | Error against that reference |
+| :---: | :---: |
+| ![Path Traced Reference](media/5_Path_Traced_Reference.png) | ![Error Heat Map](media/6_Error_Heatmap.png) |
+| *2048 spp ground truth, 185 s per frame* | *Mode 1 minus reference, blue 0 to red 0.25* |
+
 ---
 
 ## Optical Modes
@@ -76,6 +83,7 @@ Dispersion uses a Cauchy-style split, $n(\lambda) = n_0 + B/\lambda^2$, collapse
 | **Mode 2** | **Frosted / Rough Glass** | Micro-roughness transmission cone sampling, softened refraction, and Gaussian-diffused caustic footprints. |
 | **Mode 3** | **High Spectral Dispersion** | Exaggerated Cauchy coefficients on crystal spheres and Newton's triangular prism, displaying distinct spectral separation. |
 | **Mode 0** | **Whitted Baseline** | Classical recursive ray tracing with binary shadow testing (no caustics, dark glass shadows). |
+| **Mode 4** | **Path Traced Reference** | Brute-force progressive path tracing of the same scene - the ground truth the other four modes are measured against. Not real-time. |
 
 ---
 
@@ -119,10 +127,11 @@ radiance_cascades_glass/
 | Feature | Apple Metal | Vulkan 1.2+ | OpenGL 4.3+ Core |
 | :--- | :---: | :---: | :---: |
 | **Language** | MSL (C++14 based) | GLSL $\to$ SPIR-V | GLSL 430 / 450 |
-| **Compute Passes** | 9 Pipelines | 9 Pipelines | 9 Programs |
+| **Compute Passes** | 10 Pipelines (9 + path traced reference) | 9 Pipelines | 9 Programs |
 | **Memory Barriers** | Implicit / Metal Fences | Explicit `VkMemoryBarrier` | `glMemoryBarrier` |
 | **Shader Storage** | `device const T*` | SSBO (`std430`) | SSBO (`std430`) |
 | **Platform Target** | macOS (Native) | Cross-platform / MoltenVK | Linux / Windows / Mesa |
+| **Path traced reference (mode 4)** | yes, with the validation studies | not yet ported | not yet ported |
 | **Measured** | 69 fps clear / 47 fps frosted @1080p | 69 fps clear / 47 fps frosted @720p, via MoltenVK | not benchmarked (macOS caps GL at 4.1, no compute) |
 
 ---
@@ -198,6 +207,7 @@ cd OpenGL && ./build.sh && ./rc_glass_gl
 | **2** | Switch to **Mode 2** (Frosted Rough Glass) |
 | **3** | Switch to **Mode 3** (High Spectral Dispersion Prism) |
 | **0** | Switch to **Mode 0** (Whitted Ray Tracing Baseline) |
+| **4** | Switch to **Mode 4** (Path Traced Reference - progressive ground truth) |
 | **+ / -** | Increase / decrease glass surface roughness |
 | **B** | Cycle sunlight brightness (6 modes: 0.8x -> 10.0x) |
 | **C** | Cycle light color (Normal -> Smooth RGB rainbow -> Stepped sharp RGB) |
@@ -225,9 +235,36 @@ Every backend takes `--headless`, which renders all four modes and writes PNGs t
 
 ### CLI Arguments
 
-- `--headless` or `--benchmark`: Renders all four modes, timing 20 frames each after 3 warm-up frames, and writes PNGs to `output/`.
+- `--headless` or `--benchmark`: Renders all four real-time modes, timing 20 frames each after 3 warm-up frames, then a 64 spp path traced frame, and writes PNGs to `output/`.
 - `--teapot <path>`: Specifies custom path to `teapot.bin` mesh data.
 - `--shader <path>`: (Metal only) Specifies custom compiled `.metallib` path.
+
+### Validation Runs (Metal)
+
+Three offline studies compare the real-time modes against the mode 4 path tracer. All three write PNGs and error heat maps to `output/`.
+
+```bash
+# Every mode against its own path traced reference
+./Metal/rc_glass_app --compare --res 1920x1080 --ref-spp 2048
+
+# What the path tracer gets for one real-time frame time, and how much it needs to catch up
+./Metal/rc_glass_app --equal-time --res 1920x1080 --ref-spp 2048 --max-spp 1024
+
+# What each pass is worth, in milliseconds and in error
+./Metal/rc_glass_app --ablation --res 1920x1080 --ref-spp 2048
+```
+
+| Argument | Meaning |
+| :--- | :--- |
+| `--ref-spp <n>` | Samples per pixel in the reference. Rendered as two independent halves so the reference reports its own residual noise. |
+| `--max-spp <n>` | Upper bound of the equal-time convergence sweep. |
+| `--spp-chunk <n>` | Samples per dispatch. Larger is faster, smaller keeps the GPU responsive. |
+| `--res <WxH>` | Resolution for the study. |
+| `--mode <n>` | Which mode's optics the equal-time and ablation studies use (default 1). |
+| `--modes <a,b,c>` | Which modes `--compare` walks (default `1,2,3,0`). |
+| `--depth <n>` | Path tracer maximum depth (default 12). |
+| `--sun-radius <deg>` | Angular radius of the sun disc in the reference (default 0.5). |
+| `--pt-clamp <v>` | Firefly clamp on a single path contribution. `0` (default) leaves the reference unbiased. |
 
 ---
 
@@ -284,6 +321,125 @@ The interval partition and the far-to-near merge come straight from Sannikov's f
 What this buys in practice: on the reference scene the old per-texel-retrace scheme spent about 4.9M ray-scene intersections a frame; the amortized version spends about 1.3M for the same four intervals at the corrected (4x) angular scaling - roughly 3.75x fewer traces while fixing the angular deficiency the old version had. On this machine (AMD Radeon Pro 5500M) the Metal cascade pass went from ~42ms to ~14.5ms.
 
 There is still a structural limit that this pass doesn't touch: probes only exist on the five room surfaces, as a 64x64 lightmap each. So this is a surface irradiance cache with a cascaded gather, not a volumetric or screen-space cascade hierarchy. Glass objects have no probes of their own and read a normal-weighted blend of the five walls.
+
+---
+
+## Validation against a path traced reference
+
+Mode 4 is a brute-force path tracer over the same scene, the same materials and the same tone map, and its only job is to be the ground truth the other four modes are measured against. It currently exists in the Metal backend only. Every number in this section was produced by the binary in this repository - the commands are in [Validation Runs](#validation-runs-metal). All measurements are on an AMD Radeon Pro 5500M at 1920x1080.
+
+### What the reference actually solves
+
+The reference is matched to the raster path's conventions on purpose, so that the two images differ by transport error and nothing else:
+
+- The sun is a disc of angular radius 0.5 degrees whose radiance is $\pi \cdot I_{\text{sun}} / \Omega$, which reproduces the raster path's $\text{albedo} \cdot I_{\text{sun}} \cdot \cos\theta$ exactly for an unshadowed diffuse hit.
+- The sky is the same `getSkyRadiance()` the cascades gather, so the ambient level is the one the cascade pass is trying to reproduce.
+- Glass is a smooth dielectric with a Fresnel-sampled reflect/refract split, Beer-Lambert absorption over each interior segment, and a lazily chosen spectral band for dispersion. In mode 2 it becomes a GGX microfacet dielectric with $\alpha = \text{roughness} \cdot 0.28$, which is what the raster path's exit cone stands in for.
+- Direct light is sampled explicitly at diffuse vertices and excluded from the environment on the next bounce, so nothing is counted twice. Glass **occludes** the shadow ray, which is precisely what the raster path does not do.
+
+Every reference is rendered as two independent halves with disjoint seeds. The RMSE between those halves is reported as the reference's own residual noise, and differences smaller than it are not claimed as results. At 2048 spp that floor is **0.0152** RMSE, about 8.7% of the error being measured.
+
+### 1. Distance from ground truth
+
+2048 spp reference per mode, metrics on the tone mapped image in display space. `bias` is the mean signed luminance error: positive means the real-time frame is too bright.
+
+| Mode | frame ms | RMSE | PSNR dB | relMSE | SSIM | bias | RMSE floor | RMSE glass | reference noise |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 clear glass | 13.92 | 0.1755 | 15.11 | 0.2510 | 0.7989 | +0.1129 | 0.2017 | 0.2179 | 0.0152 |
+| 2 frosted glass | 20.60 | 0.1748 | 15.15 | 0.2058 | 0.7228 | +0.1166 | 0.2084 | 0.1924 | 0.0218 |
+| 3 high dispersion | 13.73 | 0.1756 | 15.11 | 0.2498 | 0.7990 | +0.1129 | 0.2015 | 0.2186 | 0.0151 |
+| 0 whitted baseline | 3.39 | 0.4168 | 7.60 | 0.6187 | 0.2764 | -0.3350 | 0.3029 | 0.4736 | 0.0192 |
+
+Each reference took roughly 185 s, between 9,000x and 51,000x one real-time frame. The floor and glass columns are restricted to pixels the *reference* classifies as floor or as glass, using the primary-hit id the path tracer parks in its accumulator's alpha channel - the segmentation is the ground truth's, not the approximation's.
+
+Reading the rows: the cascade modes land at ~15 dB PSNR and 0.80 SSIM, the Whitted baseline at 7.6 dB and 0.28. The `bias` column says which way each mode fails - the cascade modes are 0.11 too bright, the Whitted baseline 0.34 too dark, which is the flat 0.04 ambient standing in for every indirect bounce. Most of what the cascade pass buys over the baseline is real, and most of what is left over is concentrated in two places, visible in `output/cmp_mode1_error.png`: the missing shadows under the glass, and the interiors of the glass objects.
+
+### 2. Equal time
+
+The question is what the path tracer produces if it is given exactly one real-time frame.
+
+```
+real-time frame:      14.10 ms   RMSE 0.1755   PSNR 15.11 dB   SSIM 0.7989
+path tracer:          90.34 ms per sample per pixel at 1920x1080
+in a 14.10 ms budget: 0.16 spp
+```
+
+It does not fit one sample. The cheapest honest image it can produce is 1 spp at 105 ms - seven and a half frame times - and that image is worse on every metric:
+
+| | RMSE | PSNR dB | SSIM |
+| :--- | ---: | ---: | ---: |
+| path traced, 1 spp (105 ms) | 0.3347 | 9.51 | 0.1159 |
+| real-time frame (14.1 ms) | 0.1755 | 15.11 | 0.7989 |
+
+Convergence, same camera, same sun, seeds disjoint from both reference halves:
+
+| spp | wall ms | RMSE | PSNR dB | SSIM |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 105.9 | 0.3348 | 9.50 | 0.1156 |
+| 2 | 232.4 | 0.2690 | 11.41 | 0.1553 |
+| 4 | 437.7 | 0.2064 | 13.71 | 0.1980 |
+| **8** | **831.2** | **0.1521** | **16.36** | 0.2510 |
+| 16 | 1,561.9 | 0.1121 | 19.01 | 0.3209 |
+| 32 | 3,007.7 | 0.0829 | 21.62 | 0.4101 |
+| 64 | 5,844.4 | 0.0622 | 24.12 | 0.5147 |
+| 128 | 11,599.3 | 0.0480 | 26.38 | 0.6228 |
+| 256 | 23,022.0 | 0.0388 | 28.22 | 0.7194 |
+| 512 | 45,574.2 | 0.0337 | 29.44 | 0.7906 |
+| 1024 | 92,505.2 | 0.0322 | 29.83 | 0.8321 |
+
+**Path tracing first reaches this frame's RMSE at 8 spp = 831 ms, 59x the real-time frame time.** By SSIM the crossover is much later - 512 spp, 45.6 s, 3,200x - because the two images fail differently: the path tracer's error at low sample counts is high-frequency noise, which SSIM punishes hard, while the cascade's error is a smooth bias, which it barely notices. Both numbers are worth quoting; quoting only the first one would be flattering the technique.
+
+### 3. Ablation
+
+Mode 1, against a 2048 spp reference whose noise floor is 0.0152 RMSE.
+
+| Case | frame ms | RMSE | PSNR dB | relMSE | SSIM | RMSE floor | RMSE glass |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| full technique | 13.87 | 0.1755 | 15.11 | 0.2510 | 0.7989 | 0.2017 | 0.2179 |
+| no cascade merge | 11.81 | 0.1511 | 16.42 | 0.1757 | 0.8065 | 0.1905 | 0.1960 |
+| no cascade GI | 10.39 | 0.3929 | 8.12 | 0.5917 | 0.3243 | 0.2897 | 0.3782 |
+| no caustic splat | 6.96 | 0.1659 | 15.60 | 0.2279 | 0.8029 | 0.1811 | 0.2155 |
+| no atlas filter | 13.76 | 0.1759 | 15.09 | 0.2525 | 0.7986 | 0.2017 | 0.2179 |
+| no temporal blend | 13.62 | 0.1756 | 15.11 | 0.2515 | 0.7988 | 0.2017 | 0.2180 |
+| no dispersion | 14.67 | 0.1753 | 15.12 | 0.2524 | 0.7975 | 0.2017 | 0.2172 |
+
+What removing each pass costs, relative to the full technique:
+
+| Removed | ms saved | dRMSE all | dRMSE floor | dRMSE glass | Verdict |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| cascade merge | 2.06 | -0.0244 | -0.0113 | -0.0219 | cheaper **and** closer to ground truth |
+| cascade GI | 3.48 | +0.2174 | +0.0880 | +0.1603 | pays for itself, by a wide margin |
+| caustic splat | 6.91 | -0.0096 | -0.0206 | -0.0024 | cheaper **and** closer to ground truth |
+| atlas filter | 0.11 | +0.0004 | 0.0000 | +0.0001 | below the reference noise floor |
+| temporal blend | 0.25 | +0.0001 | 0.0000 | +0.0002 | below the reference noise floor |
+| dispersion | -0.80 | -0.0002 | -0.0001 | -0.0006 | below the reference noise floor |
+
+Three results here are uncomfortable and none of them are hidden:
+
+**The cascade GI pass is the whole technique.** Removing it costs 0.217 RMSE, fourteen times the noise floor, and drops SSIM from 0.80 to 0.32 for a saving of 3.5 ms. Everything else in this table is a rounding error next to it.
+
+**The four-level hierarchy does not pay off on this scene.** Replacing it with a single level-0 gather - the same 64x64 probes and 16 directions, stretched over the whole [0.005, 100] range - is 2.06 ms cheaper *and* 0.024 RMSE closer to ground truth, using a quarter of the rays. The hierarchy's advantage is angular resolution in the far field, and cascade 0 then averages its 16 merged directions down to a single irradiance value per atlas texel, which throws that resolution away before anything can use it. The hierarchy is the right structure for a directional cache; it is not obviously the right structure for a lightmap.
+
+**The caustic splat currently costs energy conservation.** It is the most expensive pass at 6.9 ms - half the frame - and removing it *lowers* floor RMSE by 0.021. The cause is structural, not a tuning problem: the shading pass's shadow ray ignores glass entirely, so the floor under a glass object already receives full unoccluded sunlight, and the splat then adds the refracted energy on top of light that was never removed. The reference occludes that shadow ray and puts the same energy back only where the refraction actually focuses it.
+
+### 4. Honest limits
+
+**Of the technique**
+
+- **Glass casts no shadow.** `evaluateSurfaceRadiance` traces its shadow ray with `testGlass = false`. This is the single largest source of error in the image, and it is what makes the caustic splat double-count.
+- **Glass is two interfaces deep.** The shading pass traces one refraction in and one out, with no internal reflection and no TIR. In the reference, the sphere shows a full inverted image of the room and the prism shows internal reflections off its far faces; neither exists here. This is most of the 0.218 RMSE in the glass region.
+- **The image is 0.11 too bright.** Mean signed luminance error against ground truth is **+0.1129** on a [0, 1] display range. That constant offset accounts for about 41% of the mean squared error on its own; subtract it and the structural residual is roughly 0.134 RMSE. Quoting "0.176 RMSE" without saying that a large part of it is a scalar exposure difference would be flattering the technique in one direction and unfair to it in the other.
+- **Probes live only on the five room surfaces.** Glass objects have no probes and read a normal-weighted blend of the five walls, so indirect light on and inside glass is an interpolation of the walls' irradiance, not of anything the glass sees.
+- **Everything above is measured for one camera and one sun position.** These are not averages over a trajectory.
+
+**Of the reference**
+
+- **The sun disc is 0.5 degrees**, roughly twice the real sun, chosen so that specular-diffuse-specular caustic paths are reachable at all. Sharper suns make the caustics converge slower, not faster.
+- **Caustics are the slowest thing in the reference to converge**, because they are found only by BSDF sampling through two refractions into a small solid angle. The 2048 spp reference is converged to a 0.0152 noise floor globally, but the caustic cores are the noisiest part of it, so the *floor* column carries more reference noise than the global one.
+- **Dispersion is three fixed bands, not a spectral integral.** The reference splits a path into one of three IOR offsets and weights it by 3, which matches what the raster path attempts, but neither is a spectral renderer.
+- **No nested dielectrics.** The medium is tracked by a single inside/outside flag, which is correct only because no two glass objects in this scene overlap.
+- **The teapot mesh is not closed.** A path that enters through a shell with no matching exit surface will leak; the analytic primitives do not have this problem.
+- **Metrics are computed on the tone mapped image**, not on HDR radiance. That is the right space for a perceptual comparison of what is on screen, and the wrong space for judging energy transport - a 10% error in a bright highlight and a 10% error in a dark corner do not weigh the same after ACES.
 
 ---
 

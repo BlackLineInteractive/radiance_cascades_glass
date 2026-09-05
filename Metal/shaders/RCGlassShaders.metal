@@ -90,7 +90,31 @@ struct GlassUniforms {
 
     uint numTeapotNodes;
     uint numTeapotTris;
-    float2 pad;
+    uint ablationMask;
+    uint pad;
+};
+
+// Ablation switches. Every bit set = the full technique; clearing one turns a
+// single contribution off so its cost and its error can be attributed.
+// Bit 2 (atlas filter) and bit 4 (cascade merge) are honoured on the host - they
+// decide which atlas is bound and how many cascade levels get dispatched - so
+// only the bits the shader itself reads are named here.
+constant uint kAblCascadeGI    = 1u << 0;
+constant uint kAblCaustics     = 1u << 1;
+constant uint kAblTemporal     = 1u << 3;
+constant uint kAblDispersion   = 1u << 5;
+
+// Path-traced reference controls. Kept in their own buffer so the reference
+// pass can be re-parameterised without touching the real-time uniforms.
+struct PathTraceParams {
+    uint samplesPerLaunch;   // paths traced per pixel by this dispatch
+    uint sampleBase;         // paths already accumulated (also the RNG decorrelator)
+    uint maxDepth;           // bounces before the path is cut
+    uint rrStartDepth;       // Russian roulette kicks in at this depth
+    float sunAngularRadius;  // radians; 0.00465 is the real sun, wider converges faster
+    float indirectClamp;     // firefly clamp on a single path contribution, <=0 disables
+    float exposure;          // shared with the raster path so both tone map identically
+    uint seedOffset;         // decorrelates an equal-time render from the reference
 };
 
 inline float dielectricFresnel(float cosThetaI, float iorI, float iorT) {
@@ -992,7 +1016,7 @@ kernel void cascadeIntegrateKernel(
 
     // Blend against the unfiltered history. Feeding the blurred atlas back in
     // would re-apply the spatial filter every frame and creep towards mush.
-    if (uniforms.frameIndex > 1) {
+    if (uniforms.frameIndex > 1 && (uniforms.ablationMask & kAblTemporal) != 0u) {
         newIrradiance = mix(newIrradiance, irradianceAtlas.read(tid).rgb, 0.70f);
     }
     irradianceAtlas.write(float4(newIrradiance, 1.0f), tid);
@@ -1062,7 +1086,7 @@ inline float3 evaluateSurfaceRadiance(
     }
 
     float3 causticRad = float3(0.0f);
-    if (hit.objectId == 2) {
+    if (hit.objectId == 2 && (uniforms.ablationMask & kAblCaustics) != 0u) {
         float uFloor = (hit.position.x - kFloorMinX) / (kFloorMaxX - kFloorMinX);
         float vFloor = (hit.position.z - kFloorMinZ) / (kFloorMaxZ - kFloorMinZ);
         if (uFloor >= 0.0f && uFloor <= 1.0f && vFloor >= 0.0f && vFloor <= 1.0f) {
@@ -1072,7 +1096,7 @@ inline float3 evaluateSurfaceRadiance(
     }
 
     float3 indirectGI = float3(0.0f);
-    if (useCascadeGI) {
+    if (useCascadeGI && (uniforms.ablationMask & kAblCascadeGI) != 0u) {
         float3 E = sampleIrradianceAtlas(hit, irradianceAtlas);
         indirectGI = E * hit.albedo;
     } else {
@@ -1511,6 +1535,7 @@ kernel void renderSceneKernel(
             pixelColor = F * reflColor + (1.0f - F) * refrColor;
         } else {
             float disp = (uniforms.renderMode == 3) ? (objDisp * 1.6f) : objDisp;
+            if ((uniforms.ablationMask & kAblDispersion) == 0u) disp = 0.0f;
             float iorR = objIor - disp;
             float iorG = objIor;
             float iorB = objIor + disp;
@@ -1657,4 +1682,282 @@ kernel void renderSceneKernel(
 
     float3 finalColor = toneMapACES(pixelColor);
     outTexture.write(float4(finalColor, 1.0f), tid);
+}
+
+// ---------------------------------------------------------------------------
+// Mode 4: brute-force path traced reference
+//
+// Same scene, same materials, same tone map as the real-time modes - the only
+// thing that changes is that transport is solved by sampling paths instead of
+// by the cascade + splat approximation. It exists to be the ground truth the
+// other four modes are measured against, not to be fast.
+//
+// Conventions are matched to the raster path on purpose, so that a converged
+// reference and a cascade frame are directly comparable:
+//   * The sun is a disc of angular radius `sunAngularRadius` whose radiance is
+//     pi * sunIntensity / omega, which reproduces exactly the raster path's
+//     `albedo * sunIntensity * NdotL` for an unshadowed diffuse hit.
+//   * The sky is the same getSkyRadiance() the cascades gather, so the ambient
+//     level is the one the cascade pass is trying to reproduce.
+//   * Glass is a smooth dielectric: Fresnel-weighted choice between one
+//     reflection and one refraction, Beer-Lambert over the interior segment,
+//     and a lazily picked spectral band for dispersion.
+// ---------------------------------------------------------------------------
+
+inline uint pcgHash(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+inline float randUniform(thread uint &state) {
+    state = state * 1664525u + 1013904223u;
+    return float(pcgHash(state) & 0x00FFFFFFu) / 16777216.0f;
+}
+
+inline float3 sampleCosineHemisphere(Basis tbn, float u1, float u2) {
+    float r = sqrt(u1);
+    float phi = 2.0f * kPi * u2;
+    return tbn.toWorld(float3(r * cos(phi), r * sin(phi), sqrt(max(0.0f, 1.0f - u1))));
+}
+
+inline float3 sampleCone(float3 axis, float cosMax, float u1, float u2) {
+    float cosTheta = 1.0f - u1 * (1.0f - cosMax);
+    float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+    float phi = 2.0f * kPi * u2;
+    Basis b = makeTBN(axis);
+    return b.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+}
+
+// GGX half-vector, sampled from D (Walter et al. 2007). Mode 2's raster path
+// approximates a rough interface by jittering the exit ray inside a cone of
+// `roughness * 0.28` radians, so the reference uses the same number as alpha and
+// roughens both interfaces properly instead of only the exit one.
+inline float3 sampleGGXNormal(Basis tbn, float alpha, float u1, float u2) {
+    float phi = 2.0f * kPi * u1;
+    float a2 = alpha * alpha;
+    float cosTheta = sqrt(max(0.0f, (1.0f - u2) / (1.0f + (a2 - 1.0f) * u2)));
+    float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+    return tbn.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+}
+
+inline float smithG1(float3 v, float3 N, float3 H, float alpha) {
+    float vn = dot(v, N);
+    if (dot(v, H) * vn <= 0.0f) return 0.0f;
+    float vn2 = vn * vn;
+    float tan2 = (1.0f - vn2) / max(1e-6f, vn2);
+    return 2.0f / (1.0f + sqrt(max(0.0f, 1.0f + alpha * alpha * tan2)));
+}
+
+// Anything the path escapes into. `includeSunDisc` is set only after a specular
+// (or camera) bounce - a diffuse vertex already sampled the sun explicitly, so
+// counting the disc again there would double the direct term.
+inline float3 environmentRadiance(
+    float3 dir,
+    float3 sunDir,
+    float3 sunRadiance,
+    float cosSunMax,
+    bool includeSunDisc
+) {
+    float3 L = getSkyRadiance(dir, sunDir);
+    if (includeSunDisc && dot(dir, sunDir) >= cosSunMax) {
+        L += sunRadiance;
+    }
+    return L;
+}
+
+kernel void pathTraceKernel(
+    uint2 tid [[thread_position_in_grid]],
+    texture2d<float, access::read_write> accumTexture [[texture(0)]],
+    texture2d<float, access::write> outTexture [[texture(1)]],
+    constant GlassUniforms &uniforms [[buffer(0)]],
+    constant PathTraceParams &pt [[buffer(1)]],
+    device const GPUBVHNode *bvhNodes [[buffer(2)]],
+    device const GPUTriangle *triangles [[buffer(3)]]
+) {
+    if (tid.x >= uniforms.width || tid.y >= uniforms.height) return;
+
+    float3 sunDir = normalize(uniforms.sunDirection);
+    float cosSunMax = cos(max(1e-4f, pt.sunAngularRadius));
+    float sunSolidAngle = 2.0f * kPi * (1.0f - cosSunMax);
+    // pi / omega, so that the reference's unshadowed direct term equals the
+    // raster path's sunColor * sunIntensity * NdotL exactly.
+    float3 sunRadiance = uniforms.sunColor * (uniforms.sunIntensity * kPi / sunSolidAngle);
+
+    uint rngState = pcgHash(tid.x + tid.y * uniforms.width) ^
+                    pcgHash((pt.sampleBase + pt.seedOffset) * 9781u + 1u);
+
+    float3 batch = float3(0.0f);
+    // Primary-hit id of the first path, parked in the accumulator's alpha so the
+    // offline comparison can restrict its metrics to the floor or to the glass
+    // without needing a separate G-buffer pass.
+    float primaryObjectId = 0.0f;
+
+    for (uint sampleIdx = 0u; sampleIdx < pt.samplesPerLaunch; sampleIdx++) {
+        float2 jitter = float2(randUniform(rngState), randUniform(rngState));
+        float2 uv = (float2(tid) + jitter) / float2(uniforms.width, uniforms.height);
+        float2 ndc = uv * 2.0f - 1.0f;
+        ndc.y = -ndc.y;
+
+        float4 viewPos = uniforms.projectionInverse * float4(ndc.x, ndc.y, 1.0f, 1.0f);
+        viewPos /= viewPos.w;
+
+        Ray ray;
+        ray.origin = uniforms.cameraPosition;
+        ray.direction = normalize((uniforms.viewInverse * float4(viewPos.xyz, 0.0f)).xyz);
+
+        float3 radiance = float3(0.0f);
+        float3 throughput = float3(1.0f);
+
+        bool includeSunDisc = true;   // the camera ray counts as a specular bounce
+        bool insideGlass = false;
+        float3 mediumAbsorption = float3(0.0f);
+
+        // Dispersion is resolved lazily: a path stays achromatic until it first
+        // meets a dispersive interface, then commits to one of three bands and
+        // pays the 3x weight. Paths that never touch glass keep full colour.
+        bool spectral = false;
+        float bandOffset = 0.0f;
+        float3 bandMask = float3(1.0f);
+
+        for (uint depth = 0u; depth < pt.maxDepth; depth++) {
+            HitRecord hit = intersectScene(ray, true, bvhNodes, triangles, uniforms.numTeapotNodes);
+
+            if (sampleIdx == 0u && depth == 0u) {
+                primaryObjectId = hit.hit ? float(hit.objectId) : 0.0f;
+            }
+
+            if (insideGlass && hit.hit) {
+                throughput *= beerLambertAbsorption(mediumAbsorption, hit.distance);
+            }
+
+            if (!hit.hit) {
+                radiance += throughput * environmentRadiance(ray.direction, sunDir, sunRadiance,
+                                                             cosSunMax, includeSunDisc);
+                break;
+            }
+
+            // Face the surface normal against the incoming ray. The mesh path
+            // already flips its interpolated normal, the analytic primitives
+            // return an outward one, so this normalises both cases; which side
+            // of the interface we are on comes from `insideGlass`, not the sign.
+            float3 N = dot(hit.normal, ray.direction) < 0.0f ? hit.normal : -hit.normal;
+
+            if (hit.isGlass) {
+                float objIor = hit.ior;
+                float disp = (uniforms.renderMode == 3) ? (hit.dispersion * 1.6f) : hit.dispersion;
+                if ((uniforms.ablationMask & kAblDispersion) == 0u) disp = 0.0f;
+
+                if (!spectral && disp > 0.0f) {
+                    float u = randUniform(rngState);
+                    uint band = min(2u, uint(u * 3.0f));
+                    bandOffset = (band == 0u) ? -1.0f : (band == 2u ? 1.0f : 0.0f);
+                    bandMask = float3(band == 0u ? 1.0f : 0.0f,
+                                      band == 1u ? 1.0f : 0.0f,
+                                      band == 2u ? 1.0f : 0.0f);
+                    throughput *= 3.0f * bandMask;
+                    spectral = true;
+                }
+                float ior = objIor + bandOffset * disp;
+
+                float iorI = insideGlass ? ior : 1.0f;
+                float iorT = insideGlass ? 1.0f : ior;
+
+                // Smooth by default; mode 2 turns the interface into a GGX
+                // microfacet dielectric, which is what its cone hack stands in for.
+                float alpha = (uniforms.renderMode == 2) ? (uniforms.glassRoughness * 0.28f) : 0.0f;
+                float3 H = N;
+                if (alpha > 1e-3f) {
+                    H = sampleGGXNormal(makeTBN(N), alpha,
+                                        randUniform(rngState), randUniform(rngState));
+                    if (dot(H, -ray.direction) < 0.0f) H = -H;
+                }
+
+                float cosI = clamp(dot(-ray.direction, H), 0.0f, 1.0f);
+                float F = dielectricFresnel(cosI, iorI, iorT);
+
+                float3 nextDir;
+                bool reflected = true;
+                if (randUniform(rngState) >= F) {
+                    // The Fresnel split is sampled exactly, so no weight applies.
+                    if (refractRay(ray.direction, H, iorI / iorT, nextDir)) {
+                        reflected = false;
+                    }
+                }
+                if (reflected) {
+                    nextDir = reflect(ray.direction, H);
+                    if (dot(nextDir, N) <= 0.0f) break;   // microfacet self-shadowed
+                } else {
+                    insideGlass = !insideGlass;
+                    mediumAbsorption = insideGlass ? hit.absorption : float3(0.0f);
+                }
+
+                if (alpha > 1e-3f) {
+                    // D-sampled half vector, so the estimator keeps the Smith
+                    // masking-shadowing ratio (Walter et al. 2007, eq. 38/41).
+                    float G1o = smithG1(-ray.direction, N, H, alpha);
+                    float G1i = smithG1(nextDir, N, H, alpha);
+                    float denom = abs(dot(-ray.direction, N)) * abs(dot(N, H));
+                    float weight = (denom > 1e-6f)
+                                 ? abs(dot(-ray.direction, H)) * G1o * G1i / denom
+                                 : 0.0f;
+                    throughput *= min(weight, 4.0f);
+                    if (weight <= 0.0f) break;
+                }
+
+                ray.origin = hit.position + nextDir * 0.0015f;
+                ray.direction = nextDir;
+                includeSunDisc = true;
+                continue;
+            }
+
+            // Diffuse surface: explicit sun-disc sample, then a cosine bounce.
+            Basis tbn = makeTBN(N);
+
+            float3 wi = sampleCone(sunDir, cosSunMax,
+                                   randUniform(rngState), randUniform(rngState));
+            float NdotL = dot(N, wi);
+            if (NdotL > 0.0f) {
+                Ray shadowRay;
+                shadowRay.origin = hit.position + N * 0.002f;
+                shadowRay.direction = wi;
+                // Glass occludes here, unlike the raster path's shadow ray. Light
+                // that gets through arrives as a refracted specular path instead,
+                // which is what makes the reference's caustics converge slowly.
+                HitRecord occluder = intersectScene(shadowRay, true, bvhNodes, triangles, uniforms.numTeapotNodes);
+                if (!occluder.hit) {
+                    float3 direct = throughput * hit.albedo * sunRadiance *
+                                    (NdotL * sunSolidAngle / kPi);
+                    if (spectral) direct *= bandMask;
+                    radiance += direct;
+                }
+            }
+
+            // Cosine-weighted bounce: f * cos / pdf collapses to the albedo.
+            throughput *= hit.albedo;
+            float3 nextDir = sampleCosineHemisphere(tbn, randUniform(rngState), randUniform(rngState));
+            ray.origin = hit.position + N * 0.002f;
+            ray.direction = nextDir;
+            includeSunDisc = false;
+
+            if (depth >= pt.rrStartDepth) {
+                float q = clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.05f, 0.95f);
+                if (randUniform(rngState) > q) break;
+                throughput /= q;
+            }
+        }
+
+        if (pt.indirectClamp > 0.0f) {
+            radiance = min(radiance, float3(pt.indirectClamp));
+        }
+        batch += radiance;
+    }
+
+    float4 prev = (pt.sampleBase == 0u) ? float4(0.0f) : accumTexture.read(tid);
+    float objectId = (pt.sampleBase == 0u) ? primaryObjectId : prev.w;
+    float4 accum = float4(prev.xyz + batch, objectId);
+    accumTexture.write(accum, tid);
+
+    float invSamples = 1.0f / float(pt.sampleBase + pt.samplesPerLaunch);
+    outTexture.write(float4(toneMapACES(accum.xyz * invSamples * pt.exposure), 1.0f), tid);
 }
