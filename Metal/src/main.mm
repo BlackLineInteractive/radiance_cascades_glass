@@ -67,7 +67,7 @@ struct GlassUniforms {
     uint32_t numTeapotNodes;
     uint32_t numTeapotTris;
     uint32_t ablationMask;
-    uint32_t pad;
+    uint32_t glassBounces;
 };
 
 // Mirrors PathTraceParams in RCGlassShaders.metal.
@@ -208,6 +208,9 @@ struct RendererState {
     uint32_t ptSeedOffset = 0;
     uint32_t ptOpticsMode = 1;   // which mode's optics the reference should model
     uint32_t ablationMask = kAblAll;
+    // How many internal reflections a refracted ray may make inside a dielectric
+    // before the remaining energy is dropped. 1 is the old single-pair behaviour.
+    uint32_t glassBounces = 4;
 
     uint32_t brightnessMode = 2; // 6 modes: 0..5 (0.8x, 1.8x, 2.8x, 4.2x, 6.5x, 10.0x)
     uint32_t lightColorMode = 0; // 3 modes: 0 (Normal), 1 (Smooth RGB), 2 (Stepped RGB)
@@ -554,7 +557,7 @@ void renderFrame(
     uniforms.numTeapotNodes = state.numTeapotNodes;
     uniforms.numTeapotTris  = state.numTeapotTris;
     uniforms.ablationMask = state.ablationMask;
-    uniforms.pad = 0;
+    uniforms.glassBounces = state.glassBounces;
 
     id<MTLBuffer> uniformBuffer = state.uniformBuffer;
     memcpy(uniformBuffer.contents, &uniforms, sizeof(GlassUniforms));
@@ -855,7 +858,7 @@ static inline SystemMetrics querySystemMetrics(id<MTLDevice> device) {
         @"VRAM:        %4.0f MB alloc  / %4.0f MB max\n"
         @"RAM:         %4.0f MB app    | %4.1f / %4.1f GB sys\n"
         @"Mode:        %s\n"
-        @"Roughness:   %.2f\n"
+        @"Roughness:   %.2f  (glass bounces: %u)\n"
         @"Brightness:  Mode %u/6 (%.1fx)\n"
         @"Light Color: %s%@",
         state.currentWidth, state.currentHeight,
@@ -865,7 +868,7 @@ static inline SystemMetrics querySystemMetrics(id<MTLDevice> device) {
         state.fps, frameTimeMs,
         m.appVramMB, m.totalVramMB,
         m.procRamMB, m.sysUsedRamGB, m.sysTotalRamGB,
-        modeStr, state.glassRoughness,
+        modeStr, state.glassRoughness, state.glassBounces,
         (state.brightnessMode % 6) + 1, curBrightness,
         colorStr,
         (state.renderMode == 4)
@@ -1101,6 +1104,14 @@ static inline SystemMetrics querySystemMetrics(id<MTLDevice> device) {
             gRenderer.renderMode = 0;
             std::cout << "[Mode] Mode 0: Whitted RT Baseline\n";
             break;
+        case '[':
+            gRenderer.glassBounces = std::max(1u, gRenderer.glassBounces - 1);
+            std::cout << "[Glass] Internal reflection budget: " << gRenderer.glassBounces << "\n";
+            break;
+        case ']':
+            gRenderer.glassBounces = std::min(8u, gRenderer.glassBounces + 1);
+            std::cout << "[Glass] Internal reflection budget: " << gRenderer.glassBounces << "\n";
+            break;
         case 'r':
         case 'R':
             gRenderer.camera = OrbitCamera();
@@ -1215,6 +1226,7 @@ static inline SystemMetrics querySystemMetrics(id<MTLDevice> device) {
     std::cout << "    [0]                 : Whitted Ray Tracing Baseline\n";
     std::cout << "    [4]                 : Path Traced Reference (progressive ground truth)\n";
     std::cout << "    [+/-]               : Adjust Roughness\n";
+    std::cout << "    [ [ / ] ]           : Internal reflection budget inside glass (1..8)\n";
     std::cout << "    [B]                 : Cycle Light Brightness (6 Modes: 0.8x -> 10.0x)\n";
     std::cout << "    [C]                 : Cycle Light Color (Normal -> Smooth RGB -> Step RGB)\n";
     std::cout << "    [O]                 : Toggle Hardware & Performance Stats Overlay\n";
@@ -2067,6 +2079,8 @@ int main(int argc, const char *argv[]) {
                     cmpWidth = uint32_t(std::max(64, atoi(res.substr(0, x).c_str())));
                     cmpHeight = uint32_t(std::max(64, atoi(res.substr(x + 1).c_str())));
                 }
+            } else if (arg == "--glass-bounces" && i + 1 < argc) {
+                gRenderer.glassBounces = uint32_t(std::min(8, std::max(1, atoi(argv[++i]))));
             } else if (arg == "--depth" && i + 1 < argc) {
                 gRenderer.ptMaxDepth = uint32_t(std::max(1, atoi(argv[++i])));
             } else if (arg == "--sun-radius" && i + 1 < argc) {

@@ -48,7 +48,7 @@ The frame is five compute passes:
 2. **Atlas filter** - 7x7 Gaussian over each surface, so probe noise does not show up as blotches on the walls.
 3. **Caustic splatting** - one photon per thread, refracted through a glass object and projected onto the floor. Because photons land wherever they land, the accumulation buffer is integer and the splat is a bilinear `atomic_fetch_add` into fixed point.
 4. **Caustic filter** - reads the integer buffer back into a float texture, with an extra roughness-driven blur in frosted mode.
-5. **Shading** - one primary ray per pixel. Glass gets a Fresnel-weighted split between one reflection ray and one refraction ray traced per channel (R/G/B use different IOR, which is what produces the coloured fringes).
+5. **Shading** - one primary ray per pixel. Glass gets a Fresnel-weighted split between a reflection ray and an interior walk traced per channel (R/G/B use different IOR, which is what produces the coloured fringes). The interior walk follows up to four internal reflections: at each exit interface the Fresnel-transmitted part leaves and is shaded, the reflected part stays inside, and a failed refraction is total internal reflection that keeps everything inside. Glass occludes the sun's shadow ray, so the beam it deflects returns only through the caustic splat.
 
 A sixth kernel, mode 4, is a brute-force path tracer over the same scene. It is not part of the frame - it is the ground truth the five passes above are measured against, and the measurements are in [Validation against a path traced reference](#validation-against-a-path-traced-reference).
 
@@ -209,6 +209,7 @@ cd OpenGL && ./build.sh && ./rc_glass_gl
 | **0** | Switch to **Mode 0** (Whitted Ray Tracing Baseline) |
 | **4** | Switch to **Mode 4** (Path Traced Reference - progressive ground truth) |
 | **+ / -** | Increase / decrease glass surface roughness |
+| **[ / ]** | Internal reflection budget inside glass (1..8, default 4) |
 | **B** | Cycle sunlight brightness (6 modes: 0.8x -> 10.0x) |
 | **C** | Cycle light color (Normal -> Smooth RGB rainbow -> Stepped sharp RGB) |
 | **O** | Toggle hardware & performance stats overlay (GPU, load, VRAM, RAM, FPS) |
@@ -262,6 +263,7 @@ Three offline studies compare the real-time modes against the mode 4 path tracer
 | `--res <WxH>` | Resolution for the study. |
 | `--mode <n>` | Which mode's optics the equal-time and ablation studies use (default 1). |
 | `--modes <a,b,c>` | Which modes `--compare` walks (default `1,2,3,0`). |
+| `--glass-bounces <n>` | Internal reflection budget inside glass, 1 to 8 (default 4). `1` reproduces the old single refraction pair. |
 | `--depth <n>` | Path tracer maximum depth (default 12). |
 | `--sun-radius <deg>` | Angular radius of the sun disc in the reference (default 0.5). |
 | `--pt-clamp <v>` | Firefly clamp on a single path contribution. `0` (default) leaves the reference unbiased. |

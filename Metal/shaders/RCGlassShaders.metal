@@ -91,7 +91,7 @@ struct GlassUniforms {
     uint numTeapotNodes;
     uint numTeapotTris;
     uint ablationMask;
-    uint pad;
+    uint glassBounces;   // internal reflection budget inside a dielectric
 };
 
 // Ablation switches. Every bit set = the full technique; clearing one turns a
@@ -483,6 +483,86 @@ inline bool intersectTeapotBVH(
     return intersectTeapotBVHInterval(ray, nodes, triangles, numNodes, 0.001f, 1e30f, tHit, hitNormal);
 }
 
+// Union of every glass object's bounds, with a margin. A sun ray that misses
+// this box cannot be shadowed by glass, which rejects most of the frame before
+// any object test runs.
+constant float3 kGlassBoundsMin = float3(-1.70f, -0.05f, -1.10f);
+constant float3 kGlassBoundsMax = float3( 1.75f,  0.95f,  1.15f);
+
+// Any-hit BVH traversal: a shadow query only needs to know whether something is
+// in the way, so this returns at the first triangle inside the interval instead
+// of tracking the closest one.
+inline bool intersectTeapotBVHAnyHit(
+    Ray ray,
+    device const GPUBVHNode *nodes,
+    device const GPUTriangle *triangles,
+    uint numNodes,
+    float tMin,
+    float tMax
+) {
+    if (numNodes == 0) return false;
+
+    constexpr int kStackSize = 64;
+    int stack[kStackSize];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0;
+
+    while (stackPtr > 0) {
+        int nodeIdx = stack[--stackPtr];
+        GPUBVHNode node = nodes[nodeIdx];
+
+        float tBox;
+        if (!intersectBoxFast(ray, node.bmin.xyz, node.bmax.xyz, tBox)) continue;
+        if (tBox >= tMax) continue;
+
+        if (node.leftChild < 0) {
+            int triCount = -node.leftChild;
+            int triStart = node.rightChild;
+            for (int i = 0; i < triCount; i++) {
+                GPUTriangle tri = triangles[triStart + i];
+                float tTri;
+                float3 nTri;
+                if (intersectTriangle(ray, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz,
+                                      tri.n0.xyz, tri.n1.xyz, tri.n2.xyz, tTri, nTri)) {
+                    if (tTri >= tMin && tTri < tMax) return true;
+                }
+            }
+        } else {
+            if (stackPtr + 2 <= kStackSize) {
+                stack[stackPtr++] = node.leftChild;
+                stack[stackPtr++] = node.rightChild;
+            }
+        }
+    }
+    return false;
+}
+
+// Is any glass object between this point and the light? Analytic objects first,
+// since they are a handful of instructions each, and the mesh last.
+inline bool glassOccludes(
+    Ray ray,
+    float tMax,
+    device const GPUBVHNode *bvhNodes,
+    device const GPUTriangle *triangles,
+    uint numNodes
+) {
+    float tSlab;
+    if (!intersectBoxFast(ray, kGlassBoundsMin, kGlassBoundsMax, tSlab)) return false;
+    if (tSlab > tMax) return false;
+
+    float t;
+    float3 n;
+    if (intersectSphere(ray, kSphereCenter, kSphereRadius, 0.001f, t, n) && t < tMax) return true;
+    if (intersectCylinder(ray, kCylinderCenter, kCylinderRadius, kCylinderHeight, 0.001f, t, n) && t < tMax) return true;
+    if (intersectTriangularPrism(ray, kPrismCenter, kPrismSide, kPrismHeight, 0.001f, t, n) && t < tMax) return true;
+
+    float3 slabMin = float3(1.00f, 0.0f, 0.35f);
+    float3 slabMax = float3(1.70f, 0.06f, 1.05f);
+    if (intersectBox(ray, slabMin, slabMax, 0.001f, t, n) && t < tMax) return true;
+
+    return intersectTeapotBVHAnyHit(ray, bvhNodes, triangles, numNodes, 0.001f, tMax);
+}
+
 inline HitRecord intersectSceneInterval(
     Ray ray,
     bool testGlass,
@@ -702,6 +782,33 @@ inline HitRecord intersectScene(
     return intersectSceneInterval(ray, testGlass, bvhNodes, triangles, numNodes, 0.001f, 1e30f);
 }
 
+// Re-intersects one specific glass object, for rays already travelling inside
+// it. The shading pass needs this because a ray inside a dielectric has to find
+// that dielectric's own far surface, not the nearest surface in the scene.
+inline bool intersectGlassObject(
+    uint objectId,
+    Ray ray,
+    float tMin,
+    device const GPUBVHNode *bvhNodes,
+    device const GPUTriangle *triangles,
+    uint numNodes,
+    thread float &tHit,
+    thread float3 &hitNormal
+) {
+    if (objectId == 10u) {
+        return intersectTeapotBVHInterval(ray, bvhNodes, triangles, numNodes, tMin, 1e30f, tHit, hitNormal);
+    } else if (objectId == 11u) {
+        return intersectSphere(ray, kSphereCenter, kSphereRadius, tMin, tHit, hitNormal);
+    } else if (objectId == 12u) {
+        return intersectCylinder(ray, kCylinderCenter, kCylinderRadius, kCylinderHeight, tMin, tHit, hitNormal);
+    } else if (objectId == 13u) {
+        return intersectTriangularPrism(ray, kPrismCenter, kPrismSide, kPrismHeight, tMin, tHit, hitNormal);
+    }
+    float3 slabMin = float3(1.00f, 0.0f, 0.35f);
+    float3 slabMax = float3(1.70f, 0.06f, 1.05f);
+    return intersectBox(ray, slabMin, slabMax, tMin, tHit, hitNormal);
+}
+
 inline float3 getSkyRadiance(float3 direction, float3 sunDir) {
     float sunDot = max(0.0f, dot(direction, sunDir));
     float3 zenithColor = float3(0.40f, 0.62f, 0.95f);
@@ -917,8 +1024,12 @@ inline float4 traceCascadeInterval(
             Ray sRay;
             sRay.origin = hit.position + hit.normal * 0.002f;
             sRay.direction = sunDir;
+            // Glass occludes: a refracting object deflects the beam rather than
+            // letting it through, and the deflected energy comes back as the
+            // splatted caustic. Letting it through here is what used to light
+            // the floor under an object twice.
             HitRecord sHit = intersectSceneInterval(sRay, false, bvhNodes, triangles, numNodes, 0.001f, 100.0f);
-            if (!sHit.hit) {
+            if (!sHit.hit && !glassOccludes(sRay, 100.0f, bvhNodes, triangles, numNodes)) {
                 directSun = sunCol * (sunInt * NdotL);
             }
         }
@@ -1079,8 +1190,11 @@ inline float3 evaluateSurfaceRadiance(
         shadowRay.origin = hit.position + hit.normal * 0.002f;
         shadowRay.direction = L;
 
+        // Same rule as the cascade gather: glass blocks the direct beam, and the
+        // caustic splat is the only path by which that energy returns.
         HitRecord shadowHit = intersectScene(shadowRay, false, bvhNodes, triangles, 0);
-        if (!shadowHit.hit) {
+        if (!shadowHit.hit &&
+            !glassOccludes(shadowRay, 100.0f, bvhNodes, triangles, uniforms.numTeapotNodes)) {
             directSun = uniforms.sunColor * (uniforms.sunIntensity * NdotL);
         }
     }
@@ -1105,6 +1219,128 @@ inline float3 evaluateSurfaceRadiance(
     }
 
     return (directSun + causticRad) * hit.albedo + indirectGI;
+}
+
+// Interior transport for one spectral band.
+//
+// The old shading pass stopped after a single refraction pair, so a glass ball
+// showed no inverted image of the room and total internal reflection was faked
+// by reflecting once off the exit surface. This walks the interior instead: at
+// every exit interface the Fresnel-transmitted part leaves and is shaded, the
+// reflected part stays inside and is followed, and a failed refraction is TIR
+// and keeps all of the energy inside. Beer-Lambert is applied per segment, so
+// a long internally reflected path is correctly darker than a short one.
+inline float traceGlassChannel(
+    uint objectId,
+    float3 entryPos,
+    float3 entryDir,
+    float ior,
+    float3 absorption,
+    uint channel,
+    constant GlassUniforms &uniforms,
+    texture2d<float, access::sample> causticTexture,
+    texture2d<float, access::sample> irradianceAtlas,
+    device const GPUBVHNode *bvhNodes,
+    device const GPUTriangle *triangles
+) {
+    float radiance = 0.0f;
+    float weight = 1.0f;
+
+    Ray ray;
+    ray.origin = entryPos + entryDir * 0.003f;
+    ray.direction = entryDir;
+
+    uint maxBounces = clamp(uniforms.glassBounces, 1u, 8u);
+    for (uint bounce = 0u; bounce < maxBounces; bounce++) {
+        float tExit;
+        float3 nExit;
+        if (!intersectGlassObject(objectId, ray, 0.001f, bvhNodes, triangles,
+                                  uniforms.numTeapotNodes, tExit, nExit)) {
+            // Open geometry (the teapot shell is not closed): shade along the
+            // current direction rather than losing the path.
+            HitRecord escapeHit = intersectScene(ray, false, bvhNodes, triangles, 0);
+            radiance += weight * evaluateSurfaceRadiance(escapeHit, ray, uniforms, true,
+                                                         causticTexture, irradianceAtlas,
+                                                         bvhNodes, triangles)[channel];
+            return radiance;
+        }
+
+        float3 P2 = ray.origin + ray.direction * tExit;
+        weight *= exp(-absorption[channel] * tExit);
+
+        float cosInside = clamp(abs(dot(ray.direction, nExit)), 0.0f, 1.0f);
+        float F = dielectricFresnel(cosInside, ior, 1.0f);
+
+        float3 T2;
+        if (refractRay(ray.direction, nExit, ior, T2)) {
+            Ray exitRay;
+            exitRay.origin = P2 + T2 * 0.008f;
+            exitRay.direction = T2;
+            HitRecord exitHit = intersectScene(exitRay, false, bvhNodes, triangles, 0);
+            radiance += weight * (1.0f - F) *
+                        evaluateSurfaceRadiance(exitHit, exitRay, uniforms, true,
+                                                causticTexture, irradianceAtlas,
+                                                bvhNodes, triangles)[channel];
+            weight *= F;
+        }
+        // A failed refraction is total internal reflection: F is 1 and the whole
+        // remaining weight continues inside, so `weight` is left alone.
+
+        if (weight < 0.02f) break;
+
+        float3 reflDir = reflect(ray.direction, nExit);
+        ray.origin = P2 + reflDir * 0.004f;
+        ray.direction = reflDir;
+    }
+
+    return radiance;
+}
+
+// Walks the same interior for the frosted mode, but only to find where the beam
+// finally leaves: mode 2 then spreads that one exit direction over a cone
+// instead of following further internal bounces.
+inline bool resolveFrostedExit(
+    uint objectId,
+    float3 entryPos,
+    float3 entryDir,
+    float ior,
+    float3 absorption,
+    constant GlassUniforms &uniforms,
+    device const GPUBVHNode *bvhNodes,
+    device const GPUTriangle *triangles,
+    thread float3 &exitPos,
+    thread float3 &exitDir,
+    thread float3 &attenuation
+) {
+    Ray ray;
+    ray.origin = entryPos + entryDir * 0.003f;
+    ray.direction = entryDir;
+    attenuation = float3(1.0f);
+
+    uint maxBounces = clamp(uniforms.glassBounces, 1u, 8u);
+    for (uint bounce = 0u; bounce < maxBounces; bounce++) {
+        float tExit;
+        float3 nExit;
+        if (!intersectGlassObject(objectId, ray, 0.001f, bvhNodes, triangles,
+                                  uniforms.numTeapotNodes, tExit, nExit)) {
+            return false;
+        }
+
+        float3 P2 = ray.origin + ray.direction * tExit;
+        attenuation *= beerLambertAbsorption(absorption, tExit);
+
+        float3 T2;
+        if (refractRay(ray.direction, nExit, ior, T2)) {
+            exitPos = P2;
+            exitDir = T2;
+            return true;
+        }
+
+        float3 reflDir = reflect(ray.direction, nExit);
+        ray.origin = P2 + reflDir * 0.004f;
+        ray.direction = reflDir;
+    }
+    return false;
 }
 
 inline float3 toneMapACES(float3 x) {
@@ -1560,43 +1796,14 @@ kernel void renderSceneKernel(
             float3 refrColor = float3(0.0f);
 
             if (okG) {
-                Ray insideRayG;
-                insideRayG.origin = P1 + T_G * 0.003f;
-                insideRayG.direction = T_G;
-
-                float tExit;
-                float3 nExit;
-                bool exitOk = false;
-
-                if (primaryHit.objectId == 10) {
-                    exitOk = intersectTeapotBVH(insideRayG, bvhNodes, triangles, uniforms.numTeapotNodes, tExit, nExit);
-                } else if (primaryHit.objectId == 11) {
-                    exitOk = intersectSphere(insideRayG, kSphereCenter, kSphereRadius, 0.001f, tExit, nExit);
-                } else if (primaryHit.objectId == 12) {
-                    exitOk = intersectCylinder(insideRayG, kCylinderCenter, kCylinderRadius, kCylinderHeight, 0.001f, tExit, nExit);
-                } else if (primaryHit.objectId == 13) {
-                    exitOk = intersectTriangularPrism(insideRayG, kPrismCenter, kPrismSide, kPrismHeight, 0.001f, tExit, nExit);
-                } else {
-                    float3 slabMin = float3(1.00f, 0.0f, 0.35f);
-                    float3 slabMax = float3(1.70f, 0.06f, 1.05f);
-                    exitOk = intersectBox(insideRayG, slabMin, slabMax, 0.001f, tExit, nExit);
-                }
-
-                if (exitOk) {
-                    float internalDist = tExit;
-                    float3 P2 = insideRayG.origin + insideRayG.direction * tExit;
-                    float3 N2 = -nExit;
-
-                    float3 absorption = beerLambertAbsorption(objAbs, internalDist);
-
-                    float3 T2_R, T2_G, T2_B;
-                    bool exitOkR = refractRay(okR ? T_R : T_G, N2, iorR / 1.0f, T2_R);
-                    bool exitOkG = refractRay(T_G, N2, iorG / 1.0f, T2_G);
-                    bool exitOkB = refractRay(okB ? T_B : T_G, N2, iorB / 1.0f, T2_B);
-
-                    if (uniforms.renderMode == 2) {
+                if (uniforms.renderMode == 2) {
+                    // Frosted: find where the beam actually leaves - which may be
+                    // after one or more total internal reflections - then spread
+                    // that exit direction over a roughness-driven cone.
+                    float3 P2, wT, atten;
+                    if (resolveFrostedExit(primaryHit.objectId, P1, T_G, iorG, objAbs,
+                                           uniforms, bvhNodes, triangles, P2, wT, atten)) {
                         float coneAngle = uniforms.glassRoughness * 0.28f;
-                        float3 wT = normalize(exitOkG ? T2_G : reflect(T_G, nExit));
                         float3 upVec = abs(wT.y) < 0.99f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
                         float3 uVec = normalize(cross(wT, upVec));
                         float3 vVec = cross(wT, uVec);
@@ -1613,9 +1820,9 @@ kernel void renderSceneKernel(
                         float3 accumRad = float3(0.0f);
                         float weightSum = 0.0f;
 
-                        for (int s = 0; s < kSamples; s++) {
-                            float theta = float(s) * 2.39996323f;
-                            float r = sqrt((float(s) + 0.5f) / float(kSamples));
+                        for (int sIdx = 0; sIdx < kSamples; sIdx++) {
+                            float theta = float(sIdx) * 2.39996323f;
+                            float r = sqrt((float(sIdx) + 0.5f) / float(kSamples));
 
                             float unrotX = r * cos(theta);
                             float unrotY = r * sin(theta);
@@ -1635,37 +1842,26 @@ kernel void renderSceneKernel(
                             accumRad += weight * evaluateSurfaceRadiance(coneHit, coneRay, uniforms, true, causticTexture, irradianceAtlas, bvhNodes, triangles);
                             weightSum += weight;
                         }
-                        refrColor = (accumRad / weightSum) * absorption;
+                        refrColor = (accumRad / weightSum) * atten;
                     } else {
-                        float3 dirR = exitOkR ? T2_R : reflect(okR ? T_R : T_G, nExit);
-                        Ray exitRayR;
-                        exitRayR.origin = P2 + dirR * 0.012f;
-                        exitRayR.direction = dirR;
-                        HitRecord hitR = intersectScene(exitRayR, false, bvhNodes, triangles, 0);
-                        float radR = evaluateSurfaceRadiance(hitR, exitRayR, uniforms, true, causticTexture, irradianceAtlas, bvhNodes, triangles).r;
-
-                        float3 dirG = exitOkG ? T2_G : reflect(T_G, nExit);
-                        Ray exitRayG;
-                        exitRayG.origin = P2 + dirG * 0.012f;
-                        exitRayG.direction = dirG;
-                        HitRecord hitG = intersectScene(exitRayG, false, bvhNodes, triangles, 0);
-                        float radG = evaluateSurfaceRadiance(hitG, exitRayG, uniforms, true, causticTexture, irradianceAtlas, bvhNodes, triangles).g;
-
-                        float3 dirB = exitOkB ? T2_B : reflect(okB ? T_B : T_G, nExit);
-                        Ray exitRayB;
-                        exitRayB.origin = P2 + dirB * 0.012f;
-                        exitRayB.direction = dirB;
-                        HitRecord hitB = intersectScene(exitRayB, false, bvhNodes, triangles, 0);
-                        float radB = evaluateSurfaceRadiance(hitB, exitRayB, uniforms, true, causticTexture, irradianceAtlas, bvhNodes, triangles).b;
-
-                        refrColor = float3(radR, radG, radB) * absorption;
+                        Ray escapeRay;
+                        escapeRay.origin = P1 + T_G * 0.02f;
+                        escapeRay.direction = T_G;
+                        HitRecord escapeHit = intersectScene(escapeRay, false, bvhNodes, triangles, 0);
+                        refrColor = evaluateSurfaceRadiance(escapeHit, escapeRay, uniforms, true, causticTexture, irradianceAtlas, bvhNodes, triangles);
                     }
                 } else {
-                    Ray escapeRay;
-                    escapeRay.origin = P1 + T_G * 0.02f;
-                    escapeRay.direction = T_G;
-                    HitRecord escapeHit = intersectScene(escapeRay, false, bvhNodes, triangles, 0);
-                    refrColor = evaluateSurfaceRadiance(escapeHit, escapeRay, uniforms, true, causticTexture, irradianceAtlas, bvhNodes, triangles);
+                    // One interior walk per spectral band: each band has its own
+                    // IOR, so each one reflects internally a different number of
+                    // times before it finds an angle it can leave through.
+                    float3 bandDirs[3] = { okR ? T_R : T_G, T_G, okB ? T_B : T_G };
+                    float bandIors[3] = { iorR, iorG, iorB };
+                    for (uint ch = 0u; ch < 3u; ch++) {
+                        refrColor[ch] = traceGlassChannel(primaryHit.objectId, P1, bandDirs[ch],
+                                                          bandIors[ch], objAbs, ch, uniforms,
+                                                          causticTexture, irradianceAtlas,
+                                                          bvhNodes, triangles);
+                    }
                 }
             }
 
