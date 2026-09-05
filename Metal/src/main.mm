@@ -1704,22 +1704,36 @@ static int runEqualTimeComparison(RendererState &state, uint32_t width, uint32_t
              ref.spp, ref.seconds, ref.noiseFloorRmse);
     std::cout << hdr << "\n";
 
-    // Progressive sweep with a seed that does not overlap either reference half.
+    // Cost per sample, measured on its own short run. Taking it from the whole
+    // sweep instead would let one stalled dispatch late in the sweep contaminate
+    // the headline equal-time number.
     state.renderMode = 4;
     state.ptOpticsMode = mode;
+    state.ptSeedOffset = 101u;
+    state.ptSamplesPerLaunch = 1;
+    resetPathTraceAccumulation(state);
+    renderFrames(state, target, 2);   // warm up
+    double msPerSpp = 0.0;
+    {
+        const int kTimingSamples = 4;
+        auto t0 = std::chrono::high_resolution_clock::now();
+        renderFrames(state, target, kTimingSamples);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        msPerSpp = std::chrono::duration<double, std::milli>(t1 - t0).count() / double(kTimingSamples);
+    }
+
+    // Progressive sweep with a seed that does not overlap either reference half.
     state.ptSeedOffset = 4242u;
     state.ptSamplesPerLaunch = 1;
     resetPathTraceAccumulation(state);
 
     std::cout << "  path tracer convergence (same camera, same frame):\n";
-    std::cout << "     spp     wall ms      RMSE     PSNR dB      SSIM   vs real-time frame\n";
+    std::cout << "     spp   modelled ms      RMSE     PSNR dB      SSIM   vs real-time frame\n";
     std::cout << "  ---------------------------------------------------------------------\n";
 
     double elapsedMs = 0.0;
     uint32_t accumulated = 0;
     uint32_t crossoverSpp = 0;
-    double crossoverMs = 0.0;
-    double msPerSpp = 0.0;
 
     for (uint32_t nextSpp = 1; nextSpp <= maxSpp; nextSpp *= 2) {
         while (accumulated < nextSpp) {
@@ -1734,7 +1748,6 @@ static int runEqualTimeComparison(RendererState &state, uint32_t width, uint32_t
             elapsedMs += std::chrono::duration<double, std::milli>(t1 - t0).count();
             accumulated += batch;
         }
-        msPerSpp = elapsedMs / double(accumulated);
 
         id<MTLCommandBuffer> sync = [state.commandQueue commandBuffer];
         if (state.ptAccumTexture.storageMode == MTLStorageModeManaged) {
@@ -1751,14 +1764,13 @@ static int runEqualTimeComparison(RendererState &state, uint32_t width, uint32_t
         ImageMetrics m = compareImages(ldr, ref.image);
 
         char row[256];
-        snprintf(row, sizeof(row), "  %6u  %9.1f  %8.4f  %8.2f  %8.4f   %s",
-                 accumulated, elapsedMs, m.rmse, m.psnr, m.ssim,
+        snprintf(row, sizeof(row), "  %6u  %12.1f  %8.4f  %8.2f  %8.4f   %s",
+                 accumulated, double(accumulated) * msPerSpp, m.rmse, m.psnr, m.ssim,
                  (m.rmse <= rcMetrics.rmse) ? "path tracer is closer" : "still worse");
         std::cout << row << "\n";
 
         if (crossoverSpp == 0 && m.rmse <= rcMetrics.rmse) {
             crossoverSpp = accumulated;
-            crossoverMs = elapsedMs;
             saveImageBufferToPNG(ldr, "output/eq_pt_crossover.png");
         }
     }
@@ -1807,6 +1819,7 @@ static int runEqualTimeComparison(RendererState &state, uint32_t width, uint32_t
     std::cout << out << "\n";
 
     if (crossoverSpp > 0) {
+        double crossoverMs = double(crossoverSpp) * msPerSpp;
         snprintf(out, sizeof(out),
                  "    path tracing first matches the real-time RMSE at %u spp = %.1f ms, "
                  "%.0fx the real-time frame time",
