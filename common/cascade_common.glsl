@@ -1,6 +1,3 @@
-// Cosine-weighted Fibonacci direction `index` out of `count`, in the probe's
-// tangent frame. Level N+1 has 4x the directions of level N (see the gather
-// kernels), so index i here corresponds to [4i, 4i+3] one level up.
 vec3 cascadeDirection(Basis tbn, int index, int count, float jitter) {
     float cosTheta = sqrt(max(0.0, 1.0 - (float(index) + 0.5) / float(count)));
     float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
@@ -8,8 +5,6 @@ vec3 cascadeDirection(Basis tbn, int index, int count, float jitter) {
     return basisToWorld(tbn, vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
 }
 
-// A cascade's probes sit at the centre of a probesPerAxis x probesPerAxis grid
-// over the surface, one probe per thread row rather than one per atlas texel.
 void cascadeProbeAt(uint surfaceId, uint probeX, uint probeY, uint probesPerAxis,
                     out vec3 origin, out Basis tbn, out vec2 uv) {
     uv = (vec2(probeX, probeY) + 0.5) / float(probesPerAxis);
@@ -35,7 +30,6 @@ vec3 evalSurfaceDirectLighting(HitRecord hit, vec3 sunDir, vec3 sunCol, float su
     return (sunIllum + ambient) * hit.albedo;
 }
 
-// Traces a ray strictly within [tMin, tMax].
 vec4 traceCascadeInterval(vec3 origin, vec3 dir, float tMin, float tMax, vec3 sunDir, vec3 sunCol, float sunInt, uint numNodes) {
     Ray probeRay;
     probeRay.origin = origin;
@@ -43,7 +37,7 @@ vec4 traceCascadeInterval(vec3 origin, vec3 dir, float tMin, float tMax, vec3 su
     HitRecord hit = intersectSceneInterval(probeRay, tMin, tMax, false, numNodes);
     if (hit.hit) {
         vec3 hitRad = evalSurfaceDirectLighting(hit, sunDir, sunCol, sunInt, numNodes);
-        // Fade near the far edge so the interval boundary is not a hard ring.
+
         float tNorm = clamp((hit.distance - tMin) / max(1e-4, tMax - tMin), 0.0, 1.0);
         float boundaryFade = smoothstep(0.85, 1.0, tNorm);
         return vec4(hitRad, boundaryFade);
@@ -51,15 +45,6 @@ vec4 traceCascadeInterval(vec3 origin, vec3 dir, float tMin, float tMax, vec3 su
     return vec4(0.0, 0.0, 0.0, 1.0);
 }
 
-// Manual bilinear fetch across a coarser cascade's probe grid, at a fixed
-// direction index. Hardware texture filtering can't be used here because
-// probes and directions are packed along the same image axis, and blending
-// across a direction boundary would mix unrelated rays.
-//
-// This has to be a macro rather than a function: GLSL function parameters
-// can't carry an image format qualifier, and imageLoad requires one, so a
-// formatted image2DArray can't be passed as an argument. The macro reads
-// `cascadeImg` (a global image binding) directly instead.
 #define CASCADE_BILINEAR(cascadeImg, resultVar, surfaceIdVal, uvVal, probesVal, raysVal, dirVal) do { \
     float _gx = (uvVal).x * float(probesVal) - 0.5; \
     float _gy = (uvVal).y * float(probesVal) - 0.5; \

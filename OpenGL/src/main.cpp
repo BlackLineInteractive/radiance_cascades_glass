@@ -118,7 +118,6 @@ static GLuint compileComputeShader(const std::string &shaderPath) {
         return 0;
     }
 
-    // Resolve #include directives
     size_t incPos = 0;
     while ((incPos = src.find("#include \"", incPos)) != std::string::npos) {
         size_t start = incPos + 10;
@@ -174,7 +173,7 @@ static GLuint compileComputeShader(const std::string &shaderPath) {
 struct OpenGLRenderer {
     GLFWwindow *window = nullptr;
 
-    GLuint cascadeGatherProgram[4] = {}; // index by cascade level 0..3
+    GLuint cascadeGatherProgram[4] = {};
     GLuint cascadeIntegrateProgram = 0;
     GLuint filterAtlasProgram = 0;
     GLuint causticsGenProgram = 0;
@@ -184,7 +183,7 @@ struct OpenGLRenderer {
 
     GLuint irradianceAtlas = 0;
     GLuint filteredIrradianceAtlas = 0;
-    GLuint cascadeTex[4] = {}; // one per cascade level, 5 array layers (room surfaces) each
+    GLuint cascadeTex[4] = {};
     GLuint causticTexture = 0;
     GLuint outTexture = 0;
 
@@ -228,9 +227,6 @@ static GLuint createStorageTexture(uint32_t w, uint32_t h) {
     return tex;
 }
 
-// A cascade level's probe grid: 5 array layers, one per room surface, each
-// probesPerAxis x probesPerAxis probes with `rays` directions packed per
-// probe along X.
 static GLuint createStorageTextureArray(uint32_t w, uint32_t h, uint32_t layers) {
     GLuint tex;
     glGenTextures(1, &tex);
@@ -339,9 +335,6 @@ bool initOpenGL(OpenGLRenderer &r, const std::string &teapotBinPath, bool headle
     r.causticTexture          = createStorageTexture(1024, 1024);
     r.outTexture              = createStorageTexture(r.width, r.height);
 
-    // One array texture per cascade level (5 layers, one per room surface).
-    // Each is fully overwritten by its gather pass every frame, so unlike the
-    // atlas textures above they don't need a startup clear.
     struct CascadeLevelDims { uint32_t probesPerAxis; uint32_t rays; };
     static constexpr CascadeLevelDims kCascadeLevelDims[4] = {
         { 64, 16 }, { 32, 64 }, { 16, 256 }, { 8, 1024 },
@@ -428,9 +421,7 @@ void renderFrameGL(OpenGLRenderer &r, float deltaTime) {
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(GlassUniformsGL), &uniforms);
 
     if (r.renderMode != 0) {
-        // Far-to-near: level 3 has nothing above it to read, level 0 reads
-        // level 1, and so on down. Each dispatch covers exactly that level's
-        // probe x ray grid, with one z-layer per room surface.
+
         struct CascadeLevelDims { uint32_t probesPerAxis; uint32_t rays; };
         static constexpr CascadeLevelDims kCascadeLevelDims[4] = {
             { 64, 16 }, { 32, 64 }, { 16, 256 }, { 8, 1024 },

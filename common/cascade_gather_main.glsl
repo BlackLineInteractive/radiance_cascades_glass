@@ -1,8 +1,3 @@
-// One invocation per (probe, direction) at this cascade level, dispatched once
-// per level, far-to-near. Each level traces its own probe grid exactly once
-// and reads the level above through sampleCascadeBilinear rather than
-// retracing it, so a coarse cascade costs what its own probe count and ray
-// count say it costs, not what the finest level below it costs.
 void main() {
     uvec3 tid = gl_GlobalInvocationID;
     uint perSurfaceWidth = CASCADE_PROBES_THIS * CASCADE_RAYS_THIS;
@@ -18,8 +13,6 @@ void main() {
     vec2 uv;
     cascadeProbeAt(surfaceId, probeX, probeY, CASCADE_PROBES_THIS, origin, tbn, uv);
 
-    // Rotates a little every frame so the temporal blend in the integrate
-    // pass averages away noise instead of freezing it.
     float jitterSeed = float(surfaceId) * 37.0 + float(uniforms.frameIndex) * 0.6180339887;
     float jitter = fract(sin(dot(vec2(probeX, probeY) + jitterSeed, vec2(12.9898, 78.233))) * 43758.5453) * (2.0 * kPi);
 

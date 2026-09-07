@@ -91,30 +91,23 @@ struct GlassUniforms {
     uint numTeapotNodes;
     uint numTeapotTris;
     uint ablationMask;
-    uint glassBounces;   // internal reflection budget inside a dielectric
+    uint glassBounces;
 };
 
-// Ablation switches. Every bit set = the full technique; clearing one turns a
-// single contribution off so its cost and its error can be attributed.
-// Bit 2 (atlas filter) and bit 4 (cascade merge) are honoured on the host - they
-// decide which atlas is bound and how many cascade levels get dispatched - so
-// only the bits the shader itself reads are named here.
 constant uint kAblCascadeGI    = 1u << 0;
 constant uint kAblCaustics     = 1u << 1;
 constant uint kAblTemporal     = 1u << 3;
 constant uint kAblDispersion   = 1u << 5;
 
-// Path-traced reference controls. Kept in their own buffer so the reference
-// pass can be re-parameterised without touching the real-time uniforms.
 struct PathTraceParams {
-    uint samplesPerLaunch;   // paths traced per pixel by this dispatch
-    uint sampleBase;         // paths already accumulated (also the RNG decorrelator)
-    uint maxDepth;           // bounces before the path is cut
-    uint rrStartDepth;       // Russian roulette kicks in at this depth
-    float sunAngularRadius;  // radians; 0.00465 is the real sun, wider converges faster
-    float indirectClamp;     // firefly clamp on a single path contribution, <=0 disables
-    float exposure;          // shared with the raster path so both tone map identically
-    uint seedOffset;         // decorrelates an equal-time render from the reference
+    uint samplesPerLaunch;
+    uint sampleBase;
+    uint maxDepth;
+    uint rrStartDepth;
+    float sunAngularRadius;
+    float indirectClamp;
+    float exposure;
+    uint seedOffset;
 };
 
 inline float dielectricFresnel(float cosThetaI, float iorI, float iorT) {
@@ -448,7 +441,7 @@ inline bool intersectTeapotBVHInterval(
             bool hitR = intersectBoxFast(ray, nodes[node.rightChild].bmin.xyz, nodes[node.rightChild].bmax.xyz, tNearR);
 
             if (hitL && hitR && stackPtr + 2 <= kStackSize) {
-                // Push the far child first so the near one pops next.
+
                 if (tNearL < tNearR) {
                     stack[stackPtr++] = node.rightChild;
                     stack[stackPtr++] = node.leftChild;
@@ -483,15 +476,9 @@ inline bool intersectTeapotBVH(
     return intersectTeapotBVHInterval(ray, nodes, triangles, numNodes, 0.001f, 1e30f, tHit, hitNormal);
 }
 
-// Union of every glass object's bounds, with a margin. A sun ray that misses
-// this box cannot be shadowed by glass, which rejects most of the frame before
-// any object test runs.
 constant float3 kGlassBoundsMin = float3(-1.70f, -0.05f, -1.10f);
 constant float3 kGlassBoundsMax = float3( 1.75f,  0.95f,  1.15f);
 
-// Any-hit BVH traversal: a shadow query only needs to know whether something is
-// in the way, so this returns at the first triangle inside the interval instead
-// of tracking the closest one.
 inline bool intersectTeapotBVHAnyHit(
     Ray ray,
     device const GPUBVHNode *nodes,
@@ -537,8 +524,6 @@ inline bool intersectTeapotBVHAnyHit(
     return false;
 }
 
-// Is any glass object between this point and the light? Analytic objects first,
-// since they are a handful of instructions each, and the mesh last.
 inline bool glassOccludes(
     Ray ray,
     float tMax,
@@ -782,9 +767,6 @@ inline HitRecord intersectScene(
     return intersectSceneInterval(ray, testGlass, bvhNodes, triangles, numNodes, 0.001f, 1e30f);
 }
 
-// Re-intersects one specific glass object, for rays already travelling inside
-// it. The shading pass needs this because a ray inside a dielectric has to find
-// that dielectric's own far surface, not the nearest surface in the scene.
 inline bool intersectGlassObject(
     uint objectId,
     Ray ray,
@@ -908,8 +890,6 @@ inline float3 sampleIrradianceAtlas(
         return sampleSurfaceAtlas(4, u, v, irradianceAtlas);
     }
 
-    // Glass objects have no atlas slot of their own, so blend the five wall
-    // probes by how much of each the shading normal faces.
     float u_xz = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
     float v_xz = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
 
@@ -939,15 +919,12 @@ struct CascadeLevelParams {
     float tMin;
     float tMax;
     uint raysThisLevel;
-    uint raysUpperLevel;          // 0 marks the terminal (farthest) cascade: nothing to merge from.
+    uint raysUpperLevel;
     uint probesPerAxisThisLevel;
-    uint probesPerAxisUpperLevel; // unused when raysUpperLevel == 0
+    uint probesPerAxisUpperLevel;
     float skyBoost;
 };
 
-// Cosine-weighted Fibonacci direction `index` out of `count`, in the probe's
-// tangent frame. Level N+1 has 4x the directions of level N (see
-// cascadeGatherKernel), so index i here corresponds to [4i, 4i+3] one level up.
 inline float3 cascadeDirection(Basis tbn, int index, int count, float jitter) {
     float cosTheta = sqrt(max(0.0f, 1.0f - (float(index) + 0.5f) / float(count)));
     float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
@@ -955,8 +932,6 @@ inline float3 cascadeDirection(Basis tbn, int index, int count, float jitter) {
     return tbn.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
 }
 
-// A cascade's probes sit at the centre of a probesPerAxis x probesPerAxis grid
-// over the surface, one probe per thread row rather than one per atlas texel.
 inline void cascadeProbeAt(uint surfaceId, uint probeX, uint probeY, uint probesPerAxis,
                            thread float3 &origin, thread Basis &tbn, thread float2 &uv) {
     uv = (float2(probeX, probeY) + 0.5f) / float(probesPerAxis);
@@ -966,10 +941,6 @@ inline void cascadeProbeAt(uint surfaceId, uint probeX, uint probeY, uint probes
     origin = pos + nor * 0.004f;
 }
 
-// Manual bilinear fetch across a coarser cascade's probe grid, at a fixed
-// direction index. Hardware texture filtering can't be used here because
-// probes and directions are packed along the same texture axis, and blending
-// across a direction boundary would mix unrelated rays.
 inline float3 sampleCascadeBilinear(
     texture2d_array<float, access::read> cascade,
     uint surfaceId,
@@ -999,7 +970,6 @@ inline float3 sampleCascadeBilinear(
     return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
 }
 
-// Traces ray strictly within distance interval [tMin, tMax] with temporal multi-bounce
 inline float4 traceCascadeInterval(
     float3 origin,
     float3 dir,
@@ -1024,10 +994,7 @@ inline float4 traceCascadeInterval(
             Ray sRay;
             sRay.origin = hit.position + hit.normal * 0.002f;
             sRay.direction = sunDir;
-            // Glass occludes: a refracting object deflects the beam rather than
-            // letting it through, and the deflected energy comes back as the
-            // splatted caustic. Letting it through here is what used to light
-            // the floor under an object twice.
+
             HitRecord sHit = intersectSceneInterval(sRay, false, bvhNodes, triangles, numNodes, 0.001f, 100.0f);
             if (!sHit.hit && !glassOccludes(sRay, 100.0f, bvhNodes, triangles, numNodes)) {
                 directSun = sunCol * (sunInt * NdotL);
@@ -1043,11 +1010,6 @@ inline float4 traceCascadeInterval(
     return float4(0.0f, 0.0f, 0.0f, 1.0f);
 }
 
-// One thread per (probe, direction) at this cascade level, dispatched once
-// per level, far-to-near (3, 2, 1, 0). Each level traces its own probe grid
-// exactly once and reads the level above through sampleCascadeBilinear rather
-// than retracing it, so a coarse cascade costs what its own probe count and
-// ray count say it costs, not what the finest level below it costs.
 kernel void cascadeGatherKernel(
     uint3 tid [[thread_position_in_grid]],
     texture2d_array<float, access::write> outCascade [[texture(0)]],
@@ -1071,8 +1033,6 @@ kernel void cascadeGatherKernel(
     float2 uv;
     cascadeProbeAt(surfaceId, probeX, probeY, level.probesPerAxisThisLevel, origin, tbn, uv);
 
-    // Rotates a little every frame so the temporal blend in
-    // cascadeIntegrateKernel averages away noise instead of freezing it.
     float jitterSeed = float(surfaceId) * 37.0f + float(uniforms.frameIndex) * 0.6180339887f;
     float jitter = fract(sin(dot(float2(probeX, probeY) + jitterSeed, float2(12.9898f, 78.233f))) * 43758.5453f) * (2.0f * kPi);
 
@@ -1101,9 +1061,6 @@ kernel void cascadeGatherKernel(
     outCascade.write(float4(result, 1.0f), uint2(tid.x, tid.y), surfaceId);
 }
 
-// Cascade 0 has exactly kAtlasSurfaceWidth probes per axis, one per output
-// atlas texel, so folding it into irradiance is a plain average over its
-// directions plus the existing history blend.
 kernel void cascadeIntegrateKernel(
     uint2 tid [[thread_position_in_grid]],
     texture2d<float, access::read_write> irradianceAtlas [[texture(0)]],
@@ -1125,8 +1082,6 @@ kernel void cascadeIntegrateKernel(
     }
     float3 newIrradiance = sum / float(level.raysThisLevel);
 
-    // Blend against the unfiltered history. Feeding the blurred atlas back in
-    // would re-apply the spatial filter every frame and creep towards mush.
     if (uniforms.frameIndex > 1 && (uniforms.ablationMask & kAblTemporal) != 0u) {
         newIrradiance = mix(newIrradiance, irradianceAtlas.read(tid).rgb, 0.70f);
     }
@@ -1175,7 +1130,9 @@ inline float3 evaluateSurfaceRadiance(
     texture2d<float, access::sample> causticTexture,
     texture2d<float, access::sample> irradianceAtlas,
     device const GPUBVHNode *bvhNodes,
-    device const GPUTriangle *triangles
+    device const GPUTriangle *triangles,
+
+    bool testGlassShadow = false
 ) {
     if (!hit.hit) {
         return getSkyRadiance(ray.direction, normalize(uniforms.sunDirection));
@@ -1190,11 +1147,10 @@ inline float3 evaluateSurfaceRadiance(
         shadowRay.origin = hit.position + hit.normal * 0.002f;
         shadowRay.direction = L;
 
-        // Same rule as the cascade gather: glass blocks the direct beam, and the
-        // caustic splat is the only path by which that energy returns.
         HitRecord shadowHit = intersectScene(shadowRay, false, bvhNodes, triangles, 0);
-        if (!shadowHit.hit &&
-            !glassOccludes(shadowRay, 100.0f, bvhNodes, triangles, uniforms.numTeapotNodes)) {
+        bool blocked = shadowHit.hit ||
+            (testGlassShadow && glassOccludes(shadowRay, 100.0f, bvhNodes, triangles, uniforms.numTeapotNodes));
+        if (!blocked) {
             directSun = uniforms.sunColor * (uniforms.sunIntensity * NdotL);
         }
     }
@@ -1221,34 +1177,24 @@ inline float3 evaluateSurfaceRadiance(
     return (directSun + causticRad) * hit.albedo + indirectGI;
 }
 
-// Interior transport for one spectral band.
-//
-// The old shading pass stopped after a single refraction pair, so a glass ball
-// showed no inverted image of the room and total internal reflection was faked
-// by reflecting once off the exit surface. This walks the interior instead: at
-// every exit interface the Fresnel-transmitted part leaves and is shaded, the
-// reflected part stays inside and is followed, and a failed refraction is TIR
-// and keeps all of the energy inside. Beer-Lambert is applied per segment, so
-// a long internally reflected path is correctly darker than a short one.
-inline float traceGlassChannel(
+inline float3 traceGlassRGB(
     uint objectId,
     float3 entryPos,
-    float3 entryDir,
-    float ior,
+    float3 dirR, float3 dirG, float3 dirB,
+    float iorR, float iorG, float iorB,
     float3 absorption,
-    uint channel,
     constant GlassUniforms &uniforms,
     texture2d<float, access::sample> causticTexture,
     texture2d<float, access::sample> irradianceAtlas,
     device const GPUBVHNode *bvhNodes,
     device const GPUTriangle *triangles
 ) {
-    float radiance = 0.0f;
-    float weight = 1.0f;
+    float3 radiance = float3(0.0f);
+    float3 weight = float3(1.0f);
 
     Ray ray;
-    ray.origin = entryPos + entryDir * 0.003f;
-    ray.direction = entryDir;
+    ray.origin = entryPos + dirG * 0.003f;
+    ray.direction = dirG;
 
     uint maxBounces = clamp(uniforms.glassBounces, 1u, 8u);
     for (uint bounce = 0u; bounce < maxBounces; bounce++) {
@@ -1256,39 +1202,66 @@ inline float traceGlassChannel(
         float3 nExit;
         if (!intersectGlassObject(objectId, ray, 0.001f, bvhNodes, triangles,
                                   uniforms.numTeapotNodes, tExit, nExit)) {
-            // Open geometry (the teapot shell is not closed): shade along the
-            // current direction rather than losing the path.
             HitRecord escapeHit = intersectScene(ray, false, bvhNodes, triangles, 0);
             radiance += weight * evaluateSurfaceRadiance(escapeHit, ray, uniforms, true,
                                                          causticTexture, irradianceAtlas,
-                                                         bvhNodes, triangles)[channel];
+                                                         bvhNodes, triangles);
             return radiance;
         }
 
         float3 P2 = ray.origin + ray.direction * tExit;
-        weight *= exp(-absorption[channel] * tExit);
+        weight *= exp(-absorption * tExit);
 
-        float cosInside = clamp(abs(dot(ray.direction, nExit)), 0.0f, 1.0f);
-        float F = dielectricFresnel(cosInside, ior, 1.0f);
+        float cosR = clamp(abs(dot(dirR, nExit)), 0.0f, 1.0f);
+        float cosG = clamp(abs(dot(dirG, nExit)), 0.0f, 1.0f);
+        float cosB = clamp(abs(dot(dirB, nExit)), 0.0f, 1.0f);
+        float3 F = float3(dielectricFresnel(cosR, iorR, 1.0f),
+                          dielectricFresnel(cosG, iorG, 1.0f),
+                          dielectricFresnel(cosB, iorB, 1.0f));
 
-        float3 T2;
-        if (refractRay(ray.direction, nExit, ior, T2)) {
-            Ray exitRay;
-            exitRay.origin = P2 + T2 * 0.008f;
-            exitRay.direction = T2;
-            HitRecord exitHit = intersectScene(exitRay, false, bvhNodes, triangles, 0);
-            radiance += weight * (1.0f - F) *
-                        evaluateSurfaceRadiance(exitHit, exitRay, uniforms, true,
-                                                causticTexture, irradianceAtlas,
-                                                bvhNodes, triangles)[channel];
-            weight *= F;
+        float3 T2R, T2G, T2B;
+        bool okR = refractRay(dirR, nExit, iorR, T2R);
+        bool okG = refractRay(dirG, nExit, iorG, T2G);
+        bool okB = refractRay(dirB, nExit, iorB, T2B);
+
+        if (okR) {
+            Ray r; r.origin = P2 + T2R * 0.008f; r.direction = T2R;
+            HitRecord h = intersectScene(r, false, bvhNodes, triangles, 0);
+            radiance.r += weight.r * (1.0f - F.r) *
+                         evaluateSurfaceRadiance(h, r, uniforms, true, causticTexture, irradianceAtlas, bvhNodes, triangles).r;
         }
-        // A failed refraction is total internal reflection: F is 1 and the whole
-        // remaining weight continues inside, so `weight` is left alone.
+        if (okG) {
+            Ray r; r.origin = P2 + T2G * 0.008f; r.direction = T2G;
+            HitRecord h = intersectScene(r, false, bvhNodes, triangles, 0);
+            radiance.g += weight.g * (1.0f - F.g) *
+                         evaluateSurfaceRadiance(h, r, uniforms, true, causticTexture, irradianceAtlas, bvhNodes, triangles).g;
+        }
+        if (okB) {
+            Ray r; r.origin = P2 + T2B * 0.008f; r.direction = T2B;
+            HitRecord h = intersectScene(r, false, bvhNodes, triangles, 0);
+            radiance.b += weight.b * (1.0f - F.b) *
+                         evaluateSurfaceRadiance(h, r, uniforms, true, causticTexture, irradianceAtlas, bvhNodes, triangles).b;
+        }
+        weight *= F;
 
-        if (weight < 0.02f) break;
+        if (max(weight.r, max(weight.g, weight.b)) < 0.02f) break;
 
         float3 reflDir = reflect(ray.direction, nExit);
+
+        if (bounce + 1u == maxBounces) {
+            Ray forcedRay;
+            forcedRay.origin = P2 + reflDir * 0.008f;
+            forcedRay.direction = reflDir;
+            HitRecord forcedHit = intersectScene(forcedRay, false, bvhNodes, triangles, 0);
+            radiance += weight * evaluateSurfaceRadiance(forcedHit, forcedRay, uniforms, true,
+                                                         causticTexture, irradianceAtlas,
+                                                         bvhNodes, triangles);
+            break;
+        }
+
+        dirR = reflect(dirR, nExit);
+        dirG = reflDir;
+        dirB = reflect(dirB, nExit);
         ray.origin = P2 + reflDir * 0.004f;
         ray.direction = reflDir;
     }
@@ -1296,9 +1269,6 @@ inline float traceGlassChannel(
     return radiance;
 }
 
-// Walks the same interior for the frosted mode, but only to find where the beam
-// finally leaves: mode 2 then spreads that one exit direction over a cone
-// instead of following further internal bounces.
 inline bool resolveFrostedExit(
     uint objectId,
     float3 entryPos,
@@ -1352,10 +1322,8 @@ inline float3 toneMapACES(float3 x) {
     return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
 }
 
-// Photon flux is accumulated in fixed point so the splat can be atomic.
 constant float kFluxFixedScale = 1000000000.0f;
 
-// Bilinear splat of a single channel's flux into the floor accumulation buffer.
 inline void splatFlux(device atomic_uint *buffer, float2 floorUV, uint channel, float flux) {
     float gx = floorUV.x * float(kCausticRes) - 0.5f;
     float gy = floorUV.y * float(kCausticRes) - 0.5f;
@@ -1376,7 +1344,6 @@ inline void splatFlux(device atomic_uint *buffer, float2 floorUV, uint channel, 
     }
 }
 
-// Continues an exit ray down to the floor plane; false if it misses the slab.
 inline bool hitFloorUV(float3 origin, float3 dir, thread float2 &floorUV) {
     if (dir.y >= -1e-4f) return false;
     float t = -origin.y / dir.y;
@@ -1390,7 +1357,6 @@ inline bool hitFloorUV(float3 origin, float3 dir, thread float2 &floorUV) {
     return true;
 }
 
-// Snell exit from inside a dielectric. N must already point into the medium.
 inline bool exitRefract(float3 incident, float3 N, float ior, float cosInside, thread float3 &outDir) {
     float sin2Out = (1.0f - cosInside * cosInside) * (ior * ior);
     if (sin2Out >= 1.0f) return false;
@@ -1398,8 +1364,6 @@ inline bool exitRefract(float3 incident, float3 N, float ior, float cosInside, t
     return true;
 }
 
-// One photon per thread. The 2048x2048 grid is split into four 1024x1024
-// quadrants, one per glass object, so all four share a single dispatch.
 kernel void generateCausticsKernel(
     uint2 tid [[thread_position_in_grid]],
     device atomic_uint *causticBuffer [[buffer(0)]],
@@ -1415,13 +1379,12 @@ kernel void generateCausticsKernel(
     float3 L = normalize(uniforms.sunDirection);
     float3 lightDir = -L;
 
-    // Emitter disc basis, perpendicular to the sun.
     float3 up = abs(L.y) < 0.99f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
     float3 uAxis = normalize(cross(L, up));
     float3 vAxis = cross(L, uAxis);
 
     if (quadrant == 0) {
-        // Sphere: entry and exit are both analytic, so no tracing is needed.
+
         float sx = (uv.x - 0.5f) * (2.0f * kSphereRadius);
         float sy = (uv.y - 0.5f) * (2.0f * kSphereRadius);
         float s2 = sx * sx + sy * sy;
@@ -1434,7 +1397,6 @@ kernel void generateCausticsKernel(
         float cosEntry = clamp(-dot(lightDir, N1), 0.0f, 1.0f);
         float rayWeight = (4.0f * kSphereRadius * kSphereRadius / float(1024 * 1024)) * uniforms.sunIntensity;
 
-        // Matches the sphere's scene material (ior 1.62, dispersion 0.040).
         float disp = (uniforms.renderMode == 3) ? 0.060f : 0.040f;
         float3 iors = 1.62f + float3(-disp, 0.0f, disp);
 
@@ -1467,10 +1429,9 @@ kernel void generateCausticsKernel(
     }
 
     if (quadrant == 1) {
-        // Teapot: two BVH queries, one for the entry hull and one for the exit.
+
         if (uniforms.numTeapotNodes == 0) return;
 
-        // Covers the mesh's XZ diagonal (bounds are +-0.664 x +-0.413).
         const float objRadius = 0.78f;
         float sx = (uv.x - 0.5f) * (2.0f * objRadius);
         float sy = (uv.y - 0.5f) * (2.0f * objRadius);
@@ -1525,7 +1486,7 @@ kernel void generateCausticsKernel(
     }
 
     if (quadrant == 2) {
-        // Cylinder: strongly absorbing, so the caustic is tinted magenta.
+
         const float objRadius = kCylinderRadius * 1.15f;
         float sx = (uv.x - 0.5f) * (2.0f * objRadius);
         float sy = (uv.y - 0.5f) * (2.0f * objRadius);
@@ -1577,8 +1538,7 @@ kernel void generateCausticsKernel(
     }
 
     {
-        // Prism: each wavelength refracts at its own angle on entry as well as
-        // exit, so the three channels have to be traced separately.
+
         const float objRadius = kPrismSide * 0.75f;
         float sx = (uv.x - 0.5f) * (2.0f * objRadius);
         float sy = (uv.y - 0.5f) * (2.0f * objRadius);
@@ -1624,7 +1584,6 @@ kernel void generateCausticsKernel(
             float2 floorUV;
             if (!hitFloorUV(P2, D2, floorUV)) continue;
 
-            // 1.5x compensates for splitting one photon across three narrow bands.
             float flux = rayWeight * uniforms.sunColor[ch] * 1.5f
                        * (1.0f - dielectricFresnel(cosEntry, 1.0f, eta))
                        * (1.0f - dielectricFresnel(cosExit, eta, 1.0f));
@@ -1713,7 +1672,7 @@ kernel void renderSceneKernel(
     if (!primaryHit.hit) {
         pixelColor = getSkyRadiance(primaryRay.direction, normalize(uniforms.sunDirection));
     } else if (!primaryHit.isGlass) {
-        pixelColor = evaluateSurfaceRadiance(primaryHit, primaryRay, uniforms, uniforms.renderMode != 0, causticTexture, irradianceAtlas, bvhNodes, triangles);
+        pixelColor = evaluateSurfaceRadiance(primaryHit, primaryRay, uniforms, uniforms.renderMode != 0, causticTexture, irradianceAtlas, bvhNodes, triangles, true);
     } else {
         float3 P1 = primaryHit.position;
         float3 N1 = primaryHit.normal;
@@ -1785,8 +1744,16 @@ kernel void renderSceneKernel(
             Ray reflRay;
             reflRay.origin = P1 + N1 * 0.003f;
             reflRay.direction = reflDir;
-            HitRecord reflHit = intersectScene(reflRay, false, bvhNodes, triangles, 0);
-            float3 reflColor = evaluateSurfaceRadiance(reflHit, reflRay, uniforms, true, causticTexture, irradianceAtlas, bvhNodes, triangles);
+
+            HitRecord reflHit = intersectScene(reflRay, true, bvhNodes, triangles, uniforms.numTeapotNodes);
+            float3 reflColor;
+            if (reflHit.hit && reflHit.isGlass) {
+                float reflCosI = clamp(dot(reflHit.normal, -reflDir), 0.0f, 1.0f);
+                float reflF = dielectricFresnel(reflCosI, 1.0f, reflHit.ior);
+                reflColor = float3(0.85f + 0.15f * reflF);
+            } else {
+                reflColor = evaluateSurfaceRadiance(reflHit, reflRay, uniforms, true, causticTexture, irradianceAtlas, bvhNodes, triangles);
+            }
 
             float3 T_R, T_G, T_B;
             bool okR = refractRay(primaryRay.direction, N1, 1.0f / iorR, T_R);
@@ -1797,9 +1764,7 @@ kernel void renderSceneKernel(
 
             if (okG) {
                 if (uniforms.renderMode == 2) {
-                    // Frosted: find where the beam actually leaves - which may be
-                    // after one or more total internal reflections - then spread
-                    // that exit direction over a roughness-driven cone.
+
                     float3 P2, wT, atten;
                     if (resolveFrostedExit(primaryHit.objectId, P1, T_G, iorG, objAbs,
                                            uniforms, bvhNodes, triangles, P2, wT, atten)) {
@@ -1808,8 +1773,6 @@ kernel void renderSceneKernel(
                         float3 uVec = normalize(cross(wT, upVec));
                         float3 vVec = cross(wT, uVec);
 
-                        // Per-pixel spiral rotation, otherwise the 16 taps line
-                        // up across neighbours and the cone bands visibly.
                         float3 ignMagic = float3(0.06711056f, 0.00583715f, 52.9829189f);
                         float ign = fract(ignMagic.z * fract(dot(float2(tid), ignMagic.xy)));
                         float phi = ign * 6.283185307f;
@@ -1832,7 +1795,6 @@ kernel void renderSceneKernel(
                             float2 off = float2(rotX, rotY) * coneAngle;
                             float3 sampleDir = normalize(wT + off.x * uVec + off.y * vVec);
 
-                            // Falls off towards the rim so the cone has no hard edge.
                             float weight = exp(-1.2f * r * r);
 
                             Ray coneRay;
@@ -1851,17 +1813,12 @@ kernel void renderSceneKernel(
                         refrColor = evaluateSurfaceRadiance(escapeHit, escapeRay, uniforms, true, causticTexture, irradianceAtlas, bvhNodes, triangles);
                     }
                 } else {
-                    // One interior walk per spectral band: each band has its own
-                    // IOR, so each one reflects internally a different number of
-                    // times before it finds an angle it can leave through.
-                    float3 bandDirs[3] = { okR ? T_R : T_G, T_G, okB ? T_B : T_G };
-                    float bandIors[3] = { iorR, iorG, iorB };
-                    for (uint ch = 0u; ch < 3u; ch++) {
-                        refrColor[ch] = traceGlassChannel(primaryHit.objectId, P1, bandDirs[ch],
-                                                          bandIors[ch], objAbs, ch, uniforms,
-                                                          causticTexture, irradianceAtlas,
-                                                          bvhNodes, triangles);
-                    }
+
+                    refrColor = traceGlassRGB(primaryHit.objectId, P1,
+                                              okR ? T_R : T_G, T_G, okB ? T_B : T_G,
+                                              iorR, iorG, iorB, objAbs, uniforms,
+                                              causticTexture, irradianceAtlas,
+                                              bvhNodes, triangles);
                 }
             }
 
@@ -1879,26 +1836,6 @@ kernel void renderSceneKernel(
     float3 finalColor = toneMapACES(pixelColor);
     outTexture.write(float4(finalColor, 1.0f), tid);
 }
-
-// ---------------------------------------------------------------------------
-// Mode 4: brute-force path traced reference
-//
-// Same scene, same materials, same tone map as the real-time modes - the only
-// thing that changes is that transport is solved by sampling paths instead of
-// by the cascade + splat approximation. It exists to be the ground truth the
-// other four modes are measured against, not to be fast.
-//
-// Conventions are matched to the raster path on purpose, so that a converged
-// reference and a cascade frame are directly comparable:
-//   * The sun is a disc of angular radius `sunAngularRadius` whose radiance is
-//     pi * sunIntensity / omega, which reproduces exactly the raster path's
-//     `albedo * sunIntensity * NdotL` for an unshadowed diffuse hit.
-//   * The sky is the same getSkyRadiance() the cascades gather, so the ambient
-//     level is the one the cascade pass is trying to reproduce.
-//   * Glass is a smooth dielectric: Fresnel-weighted choice between one
-//     reflection and one refraction, Beer-Lambert over the interior segment,
-//     and a lazily picked spectral band for dispersion.
-// ---------------------------------------------------------------------------
 
 inline uint pcgHash(uint v) {
     uint state = v * 747796405u + 2891336453u;
@@ -1925,10 +1862,6 @@ inline float3 sampleCone(float3 axis, float cosMax, float u1, float u2) {
     return b.toWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
 }
 
-// GGX half-vector, sampled from D (Walter et al. 2007). Mode 2's raster path
-// approximates a rough interface by jittering the exit ray inside a cone of
-// `roughness * 0.28` radians, so the reference uses the same number as alpha and
-// roughens both interfaces properly instead of only the exit one.
 inline float3 sampleGGXNormal(Basis tbn, float alpha, float u1, float u2) {
     float phi = 2.0f * kPi * u1;
     float a2 = alpha * alpha;
@@ -1945,9 +1878,6 @@ inline float smithG1(float3 v, float3 N, float3 H, float alpha) {
     return 2.0f / (1.0f + sqrt(max(0.0f, 1.0f + alpha * alpha * tan2)));
 }
 
-// Anything the path escapes into. `includeSunDisc` is set only after a specular
-// (or camera) bounce - a diffuse vertex already sampled the sun explicitly, so
-// counting the disc again there would double the direct term.
 inline float3 environmentRadiance(
     float3 dir,
     float3 sunDir,
@@ -1976,17 +1906,14 @@ kernel void pathTraceKernel(
     float3 sunDir = normalize(uniforms.sunDirection);
     float cosSunMax = cos(max(1e-4f, pt.sunAngularRadius));
     float sunSolidAngle = 2.0f * kPi * (1.0f - cosSunMax);
-    // pi / omega, so that the reference's unshadowed direct term equals the
-    // raster path's sunColor * sunIntensity * NdotL exactly.
+
     float3 sunRadiance = uniforms.sunColor * (uniforms.sunIntensity * kPi / sunSolidAngle);
 
     uint rngState = pcgHash(tid.x + tid.y * uniforms.width) ^
                     pcgHash((pt.sampleBase + pt.seedOffset) * 9781u + 1u);
 
     float3 batch = float3(0.0f);
-    // Primary-hit id of the first path, parked in the accumulator's alpha so the
-    // offline comparison can restrict its metrics to the floor or to the glass
-    // without needing a separate G-buffer pass.
+
     float primaryObjectId = 0.0f;
 
     for (uint sampleIdx = 0u; sampleIdx < pt.samplesPerLaunch; sampleIdx++) {
@@ -2005,13 +1932,10 @@ kernel void pathTraceKernel(
         float3 radiance = float3(0.0f);
         float3 throughput = float3(1.0f);
 
-        bool includeSunDisc = true;   // the camera ray counts as a specular bounce
+        bool includeSunDisc = true;
         bool insideGlass = false;
         float3 mediumAbsorption = float3(0.0f);
 
-        // Dispersion is resolved lazily: a path stays achromatic until it first
-        // meets a dispersive interface, then commits to one of three bands and
-        // pays the 3x weight. Paths that never touch glass keep full colour.
         bool spectral = false;
         float bandOffset = 0.0f;
         float3 bandMask = float3(1.0f);
@@ -2033,10 +1957,6 @@ kernel void pathTraceKernel(
                 break;
             }
 
-            // Face the surface normal against the incoming ray. The mesh path
-            // already flips its interpolated normal, the analytic primitives
-            // return an outward one, so this normalises both cases; which side
-            // of the interface we are on comes from `insideGlass`, not the sign.
             float3 N = dot(hit.normal, ray.direction) < 0.0f ? hit.normal : -hit.normal;
 
             if (hit.isGlass) {
@@ -2059,8 +1979,6 @@ kernel void pathTraceKernel(
                 float iorI = insideGlass ? ior : 1.0f;
                 float iorT = insideGlass ? 1.0f : ior;
 
-                // Smooth by default; mode 2 turns the interface into a GGX
-                // microfacet dielectric, which is what its cone hack stands in for.
                 float alpha = (uniforms.renderMode == 2) ? (uniforms.glassRoughness * 0.28f) : 0.0f;
                 float3 H = N;
                 if (alpha > 1e-3f) {
@@ -2075,22 +1993,21 @@ kernel void pathTraceKernel(
                 float3 nextDir;
                 bool reflected = true;
                 if (randUniform(rngState) >= F) {
-                    // The Fresnel split is sampled exactly, so no weight applies.
+
                     if (refractRay(ray.direction, H, iorI / iorT, nextDir)) {
                         reflected = false;
                     }
                 }
                 if (reflected) {
                     nextDir = reflect(ray.direction, H);
-                    if (dot(nextDir, N) <= 0.0f) break;   // microfacet self-shadowed
+                    if (dot(nextDir, N) <= 0.0f) break;
                 } else {
                     insideGlass = !insideGlass;
                     mediumAbsorption = insideGlass ? hit.absorption : float3(0.0f);
                 }
 
                 if (alpha > 1e-3f) {
-                    // D-sampled half vector, so the estimator keeps the Smith
-                    // masking-shadowing ratio (Walter et al. 2007, eq. 38/41).
+
                     float G1o = smithG1(-ray.direction, N, H, alpha);
                     float G1i = smithG1(nextDir, N, H, alpha);
                     float denom = abs(dot(-ray.direction, N)) * abs(dot(N, H));
@@ -2107,7 +2024,6 @@ kernel void pathTraceKernel(
                 continue;
             }
 
-            // Diffuse surface: explicit sun-disc sample, then a cosine bounce.
             Basis tbn = makeTBN(N);
 
             float3 wi = sampleCone(sunDir, cosSunMax,
@@ -2117,9 +2033,7 @@ kernel void pathTraceKernel(
                 Ray shadowRay;
                 shadowRay.origin = hit.position + N * 0.002f;
                 shadowRay.direction = wi;
-                // Glass occludes here, unlike the raster path's shadow ray. Light
-                // that gets through arrives as a refracted specular path instead,
-                // which is what makes the reference's caustics converge slowly.
+
                 HitRecord occluder = intersectScene(shadowRay, true, bvhNodes, triangles, uniforms.numTeapotNodes);
                 if (!occluder.hit) {
                     float3 direct = throughput * hit.albedo * sunRadiance *
@@ -2129,7 +2043,6 @@ kernel void pathTraceKernel(
                 }
             }
 
-            // Cosine-weighted bounce: f * cos / pdf collapses to the albedo.
             throughput *= hit.albedo;
             float3 nextDir = sampleCosineHemisphere(tbn, randUniform(rngState), randUniform(rngState));
             ray.origin = hit.position + N * 0.002f;

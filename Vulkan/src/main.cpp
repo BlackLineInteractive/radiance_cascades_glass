@@ -137,7 +137,7 @@ struct VulkanRenderer {
     VkDescriptorSet descSet = VK_NULL_HANDLE;
 
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline cascadeGatherPipeline[4] = {}; // index by cascade level 0..3
+    VkPipeline cascadeGatherPipeline[4] = {};
     VkPipeline cascadeIntegratePipeline = VK_NULL_HANDLE;
     VkPipeline filterAtlasPipeline = VK_NULL_HANDLE;
     VkPipeline causticsGenPipeline = VK_NULL_HANDLE;
@@ -154,7 +154,7 @@ struct VulkanRenderer {
 
     VulkanImage irradianceAtlas;
     VulkanImage filteredAtlas;
-    VulkanImage cascadeTex[4]; // one per cascade level, 5 array layers (rooms surfaces) each
+    VulkanImage cascadeTex[4];
     VulkanImage causticTexture;
     VulkanImage outTexture;
 
@@ -260,9 +260,6 @@ static bool createImage(VulkanRenderer &r, uint32_t w, uint32_t h, VkFormat form
     return true;
 }
 
-// A cascade level's probe grid, one array layer per room surface. Kept
-// separate from createImage because array views need VK_IMAGE_VIEW_TYPE_2D_ARRAY
-// and a layerCount to match, not just a different arrayLayers count.
 static bool createImageArray(VulkanRenderer &r, uint32_t w, uint32_t h, uint32_t layers, VkFormat format, VkImageUsageFlags usage, VulkanImage &img) {
     img.width = w;
     img.height = h;
@@ -490,7 +487,6 @@ bool initVulkan(VulkanRenderer &r, const std::string &teapotBinPath) {
     allocInfo.commandBufferCount = 1;
     if (vkAllocateCommandBuffers(r.device, &allocInfo, &r.commandBuffer) != VK_SUCCESS) return false;
 
-    // Descriptor Set Layout
     std::vector<VkDescriptorSetLayoutBinding> bindings = {
         { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
         { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
@@ -502,7 +498,7 @@ bool initVulkan(VulkanRenderer &r, const std::string &teapotBinPath) {
         { 7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
         { 8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
         { 9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
-        // Cascade level probe grids: binding (10 + level), one array layer per room surface.
+
         { 10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
         { 11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
         { 12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
@@ -521,7 +517,6 @@ bool initVulkan(VulkanRenderer &r, const std::string &teapotBinPath) {
     pipelineLayoutInfo.pSetLayouts = &r.descSetLayout;
     if (vkCreatePipelineLayout(r.device, &pipelineLayoutInfo, nullptr, &r.pipelineLayout) != VK_SUCCESS) return false;
 
-    // Load SPIR-V Shaders
     std::string baseSpv = resolveExistingPath({
         "Vulkan/shaders/filter_atlas.spv",
         "shaders/filter_atlas.spv"
@@ -544,7 +539,6 @@ bool initVulkan(VulkanRenderer &r, const std::string &teapotBinPath) {
         return false;
     }
 
-    // Sampler
     VkSamplerCreateInfo samplerInfo{};
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     samplerInfo.magFilter = VK_FILTER_LINEAR;
@@ -554,17 +548,12 @@ bool initVulkan(VulkanRenderer &r, const std::string &teapotBinPath) {
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (vkCreateSampler(r.device, &samplerInfo, nullptr, &r.linearSampler) != VK_SUCCESS) return false;
 
-    // Images
     VkImageUsageFlags imgUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     createImage(r, 320, 64, VK_FORMAT_R32G32B32A32_SFLOAT, imgUsage, r.irradianceAtlas);
     createImage(r, 320, 64, VK_FORMAT_R32G32B32A32_SFLOAT, imgUsage, r.filteredAtlas);
     createImage(r, 1024, 1024, VK_FORMAT_R32G32B32A32_SFLOAT, imgUsage, r.causticTexture);
     createImage(r, r.width, r.height, VK_FORMAT_R32G32B32A32_SFLOAT, imgUsage, r.outTexture);
 
-    // One array texture per cascade level (5 layers, one per room surface),
-    // sized probesPerAxis x probesPerAxis probes with `rays` directions packed
-    // per probe along X. Each is fully overwritten by its gather pass every
-    // frame, so unlike the atlas images above they don't need a startup clear.
     struct CascadeLevelDims { uint32_t probesPerAxis; uint32_t rays; };
     static constexpr CascadeLevelDims kCascadeLevelDims[4] = {
         { 64, 16 }, { 32, 64 }, { 16, 256 }, { 8, 1024 },
@@ -576,7 +565,6 @@ bool initVulkan(VulkanRenderer &r, const std::string &teapotBinPath) {
         createImageArray(r, w, h, 5, VK_FORMAT_R32G32B32A32_SFLOAT, cascadeUsage, r.cascadeTex[level]);
     }
 
-    // Initial Image Transitions
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -597,7 +585,6 @@ bool initVulkan(VulkanRenderer &r, const std::string &teapotBinPath) {
     vkQueueSubmit(r.computeQueue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(r.computeQueue);
 
-    // Buffers
     createBuffer(r, sizeof(GlassUniformsVK), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, r.uniformBuffer);
 
     TeapotMesh teapot;
@@ -626,7 +613,6 @@ bool initVulkan(VulkanRenderer &r, const std::string &teapotBinPath) {
     VkDeviceSize stageSize = r.width * r.height * 4 * sizeof(float);
     createBuffer(r, stageSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, r.stagingBuffer);
 
-    // Descriptor Pool & Set
     std::vector<VkDescriptorPoolSize> poolSizes = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 },
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 },
@@ -745,9 +731,7 @@ void renderFrameVK(VulkanRenderer &r, float deltaTime) {
     b1.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
     if (r.renderMode != 0) {
-        // Far-to-near: level 3 has nothing above it to read, level 0 reads
-        // level 1, and so on down. Each dispatch covers exactly that level's
-        // probe x ray grid, with one z-slice per room surface.
+
         struct CascadeLevelDims { uint32_t probesPerAxis; uint32_t rays; };
         static constexpr CascadeLevelDims kCascadeLevelDims[4] = {
             { 64, 16 }, { 32, 64 }, { 16, 256 }, { 8, 1024 },
@@ -935,7 +919,6 @@ int main(int argc, const char *argv[]) {
         return runHeadlessVK(gVK);
     }
 
-    // If running in GUI mode, we also initialize GLFW window and run interactive loop
     if (!glfwInit()) {
         std::cerr << "[Vulkan] Failed to init GLFW\n";
         return 1;

@@ -40,7 +40,7 @@ bool intersectTeapotBVHInterval(Ray ray, float tMin, float tMax, uint numNodes, 
             bool hitR = intersectBoxFast(ray, bvhNodes[node.rightChild].bmin.xyz, bvhNodes[node.rightChild].bmax.xyz, tNearR);
 
             if (hitL && hitR && stackPtr + 2 <= kStackSize) {
-                // Push the far child first so the near one pops next.
+
                 if (tNearL < tNearR) {
                     stack[stackPtr++] = node.rightChild;
                     stack[stackPtr++] = node.leftChild;

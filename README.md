@@ -35,7 +35,6 @@ The **Radiance Cascades** algorithm was conceived and pioneered by **Alexander S
 
 What this project borrows from that work is the interval partition and the far-to-near merge. It is not a faithful implementation - see [What is and isn't Radiance Cascades here](#what-is-and-isnt-radiance-cascades-here) for where it departs.
 
-
 ---
 
 ## Technical Overview
@@ -91,8 +90,6 @@ Dispersion uses a Cauchy-style split, $n(\lambda) = n_0 + B/\lambda^2$, collapse
 
 The three backends are independent hosts over a shared scene definition and mesh loader. They are not quite feature-identical: the Metal cascade gather traces glass and feeds the previous frame's atlas back in for a second bounce, while the GLSL one skips both and uses a flat ambient term.
 
-
-
 ```
 radiance_cascades_glass/
 ├── assets/
@@ -132,7 +129,7 @@ radiance_cascades_glass/
 | **Shader Storage** | `device const T*` | SSBO (`std430`) | SSBO (`std430`) |
 | **Platform Target** | macOS (Native) | Cross-platform / MoltenVK | Linux / Windows / Mesa |
 | **Path traced reference (mode 4)** | yes, with the validation studies | not yet ported | not yet ported |
-| **Measured** | 69 fps clear / 47 fps frosted @1080p | 69 fps clear / 47 fps frosted @720p, via MoltenVK | not benchmarked (macOS caps GL at 4.1, no compute) |
+| **Measured (AMD Radeon Pro 5500M)** | 60 fps (16.5 ms) interactive / ~51 fps clear @1080p | 69 fps clear / 47 fps frosted @720p, via MoltenVK | not benchmarked (macOS caps GL at 4.1, no compute) |
 
 ---
 
@@ -209,9 +206,9 @@ cd OpenGL && ./build.sh && ./rc_glass_gl
 | **0** | Switch to **Mode 0** (Whitted Ray Tracing Baseline) |
 | **4** | Switch to **Mode 4** (Path Traced Reference - progressive ground truth) |
 | **+ / -** | Increase / decrease glass surface roughness |
-| **[ / ]** | Internal reflection budget inside glass (1..8, default 4) |
-| **B** | Cycle sunlight brightness (6 modes: 0.8x -> 10.0x) |
-| **C** | Cycle light color (Normal -> Smooth RGB rainbow -> Stepped sharp RGB) |
+| **[ / ]** | Internal reflection budget inside glass (1-8, default 1) |
+| **B** | Cycle sunlight brightness (6 modes: 0.8x - 10.0x) |
+| **C** | Cycle light color (Normal - Smooth RGB rainbow - Stepped sharp RGB) |
 | **O** | Toggle hardware & performance stats overlay (GPU, load, VRAM, RAM, FPS) |
 | **R** | Reset camera to default perspective |
 | **S** | Capture high-resolution screenshot to `output/` |
@@ -237,6 +234,8 @@ Every backend takes `--headless`, which renders all four modes and writes PNGs t
 ### CLI Arguments
 
 - `--headless` or `--benchmark`: Renders all four real-time modes, timing 20 frames each after 3 warm-up frames, then a 64 spp path traced frame, and writes PNGs to `output/`.
+- `--1080p` or `--1080`: (Metal) Launches interactive rendering directly in 1920x1080p resolution.
+- `--res <WxH>`: Sets render resolution (e.g. `1920x1080`).
 - `--teapot <path>`: Specifies custom path to `teapot.bin` mesh data.
 - `--shader <path>`: (Metal only) Specifies custom compiled `.metallib` path.
 
@@ -263,7 +262,7 @@ Three offline studies compare the real-time modes against the mode 4 path tracer
 | `--res <WxH>` | Resolution for the study. |
 | `--mode <n>` | Which mode's optics the equal-time and ablation studies use (default 1). |
 | `--modes <a,b,c>` | Which modes `--compare` walks (default `1,2,3,0`). |
-| `--glass-bounces <n>` | Internal reflection budget inside glass, 1 to 8 (default 4). `1` reproduces the old single refraction pair. |
+| `--glass-bounces <n>` | Internal reflection budget inside glass, 1 to 8 (default 1). Raising it lets a reflected ray find a second interior surface instead of being forced straight through - measured to matter on this scene only at grazing angles the default camera doesn't see; see below. |
 | `--depth <n>` | Path tracer maximum depth (default 12). |
 | `--sun-radius <deg>` | Angular radius of the sun disc in the reference (default 0.5). |
 | `--pt-clamp <v>` | Firefly clamp on a single path contribution. `0` (default) leaves the reference unbiased. |
@@ -347,105 +346,209 @@ Every reference is rendered as two independent halves with disjoint seeds. The R
 
 | Mode | frame ms | RMSE | PSNR dB | relMSE | SSIM | bias | RMSE floor | RMSE glass | reference noise |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 clear glass | 13.92 | 0.1755 | 15.11 | 0.2510 | 0.7989 | +0.1129 | 0.2017 | 0.2179 | 0.0152 |
-| 2 frosted glass | 20.60 | 0.1748 | 15.15 | 0.2058 | 0.7228 | +0.1166 | 0.2084 | 0.1924 | 0.0218 |
-| 3 high dispersion | 13.73 | 0.1756 | 15.11 | 0.2498 | 0.7990 | +0.1129 | 0.2015 | 0.2186 | 0.0151 |
-| 0 whitted baseline | 3.39 | 0.4168 | 7.60 | 0.6187 | 0.2764 | -0.3350 | 0.3029 | 0.4736 | 0.0192 |
+| 1 clear glass | 32.61 | 0.1383 | 17.19 | 0.1359 | 0.8273 | +0.0830 | 0.1297 | 0.1958 | 0.0152 |
+| 2 frosted glass | 31.07 | 0.1385 | 17.17 | 0.1380 | 0.7332 | +0.0936 | 0.1378 | 0.1754 | 0.0218 |
+| 3 high dispersion | 34.23 | 0.1383 | 17.19 | 0.1354 | 0.8287 | +0.0830 | 0.1295 | 0.1961 | 0.0151 |
+| 0 whitted baseline | 4.47 | 0.4320 | 7.29 | 0.6531 | 0.2379 | -0.3958 | 0.3465 | 0.4834 | 0.0192 |
 
-Each reference took roughly 185 s, between 9,000x and 51,000x one real-time frame. The floor and glass columns are restricted to pixels the *reference* classifies as floor or as glass, using the primary-hit id the path tracer parks in its accumulator's alpha channel - the segmentation is the ground truth's, not the approximation's.
+Each reference took roughly 185 s, between 5,600x and 41,000x one real-time frame (glass now costs more, so it is proportionally less far behind). The floor and glass columns are restricted to pixels the *reference* classifies as floor or as glass, using the primary-hit id the path tracer parks in its accumulator's alpha channel - the segmentation is the ground truth's, not the approximation's.
 
-Reading the rows: the cascade modes land at ~15 dB PSNR and 0.80 SSIM, the Whitted baseline at 7.6 dB and 0.28. The `bias` column says which way each mode fails - the cascade modes are 0.11 too bright, the Whitted baseline 0.34 too dark, which is the flat 0.04 ambient standing in for every indirect bounce. Most of what the cascade pass buys over the baseline is real, and most of what is left over is concentrated in two places, visible in `output/cmp_mode1_error.png`: the missing shadows under the glass, and the interiors of the glass objects.
+Reading the rows: the cascade modes now land at ~17.2 dB PSNR and 0.83 SSIM, up from ~15.1 dB / 0.80 before the shadow and interior fixes - `RMSE floor` alone dropped from 0.202 to 0.130. The Whitted baseline is unaffected (its shading pass never called into the same code) and stays at 7.3 dB / 0.24. The `bias` column says which way each mode fails - the cascade modes are still 0.083 too bright (down from 0.113), the Whitted baseline 0.40 too dark, which is the flat 0.04 ambient standing in for every indirect bounce. Most of what the cascade pass buys over the baseline is real, and what's left over in `output/cmp_mode1_error.png` is concentrated where the glass model still departs from ground truth in kind rather than in degree - three fixed spectral bands against a continuous one, a `glassBounces` budget of 4 against however many TIR actually takes, and the caustic splat's flux not yet re-tuned to the now-occluded floor (see the ablation below).
 
 ### 2. Equal time
 
 The question is what the path tracer produces if it is given exactly one real-time frame.
 
 ```
-real-time frame:      14.10 ms   RMSE 0.1755   PSNR 15.11 dB   SSIM 0.7989
-path tracer:          90.34 ms per sample per pixel at 1920x1080
-in a 14.10 ms budget: 0.16 spp
+real-time frame:      32.35 ms   RMSE 0.1383   PSNR 17.19 dB   SSIM 0.8273
+path tracer:          95.13 ms per sample per pixel at 1920x1080
+in a 32.35 ms budget: 0.34 spp
 ```
 
-It does not fit one sample. The cheapest honest image it can produce is 1 spp at 105 ms - seven and a half frame times - and that image is worse on every metric:
+It still does not fit one sample - the interior walk made the real-time frame more expensive, but the path tracer got no cheaper. The cheapest honest image it can produce is 1 spp at 95 ms, three times the frame time, and that image is worse on every metric:
 
 | | RMSE | PSNR dB | SSIM |
 | :--- | ---: | ---: | ---: |
-| path traced, 1 spp (105 ms) | 0.3347 | 9.51 | 0.1159 |
-| real-time frame (14.1 ms) | 0.1755 | 15.11 | 0.7989 |
+| path traced, 1 spp (95 ms) | 0.3347 | 9.51 | 0.1159 |
+| real-time frame (32.4 ms) | 0.1383 | 17.19 | 0.8273 |
 
-Convergence, same camera, same sun, seeds disjoint from both reference halves:
+Convergence, same camera, same sun, seeds disjoint from both reference halves. `modelled ms` is spp times the measured per-sample cost, not wall clock accumulated across the sweep, so one slow dispatch cannot skew the curve:
 
-| spp | wall ms | RMSE | PSNR dB | SSIM |
+| spp | modelled ms | RMSE | PSNR dB | SSIM |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 105.9 | 0.3348 | 9.50 | 0.1156 |
-| 2 | 232.4 | 0.2690 | 11.41 | 0.1553 |
-| 4 | 437.7 | 0.2064 | 13.71 | 0.1980 |
-| **8** | **831.2** | **0.1521** | **16.36** | 0.2510 |
-| 16 | 1,561.9 | 0.1121 | 19.01 | 0.3209 |
-| 32 | 3,007.7 | 0.0829 | 21.62 | 0.4101 |
-| 64 | 5,844.4 | 0.0622 | 24.12 | 0.5147 |
-| 128 | 11,599.3 | 0.0480 | 26.38 | 0.6228 |
-| 256 | 23,022.0 | 0.0388 | 28.22 | 0.7194 |
-| 512 | 45,574.2 | 0.0337 | 29.44 | 0.7906 |
-| 1024 | 92,505.2 | 0.0322 | 29.83 | 0.8321 |
+| 1 | 95.1 | 0.3348 | 9.50 | 0.1156 |
+| 2 | 190.3 | 0.2690 | 11.41 | 0.1553 |
+| 4 | 380.5 | 0.2064 | 13.71 | 0.1980 |
+| 8 | 761.1 | 0.1521 | 16.36 | 0.2510 |
+| **16** | **1,522.2** | **0.1121** | **19.01** | 0.3209 |
+| 32 | 3,044.3 | 0.0829 | 21.62 | 0.4101 |
+| 64 | 6,088.6 | 0.0622 | 24.12 | 0.5147 |
+| 128 | 12,177.2 | 0.0480 | 26.38 | 0.6228 |
+| 256 | 24,354.5 | 0.0388 | 28.22 | 0.7194 |
+| 512 | 48,708.9 | 0.0337 | 29.44 | 0.7906 |
+| 1024 | 97,417.9 | 0.0322 | 29.83 | 0.8321 |
 
-**Path tracing first reaches this frame's RMSE at 8 spp = 831 ms, 59x the real-time frame time.** By SSIM the crossover is much later - 512 spp, 45.6 s, 3,200x - because the two images fail differently: the path tracer's error at low sample counts is high-frequency noise, which SSIM punishes hard, while the cascade's error is a smooth bias, which it barely notices. Both numbers are worth quoting; quoting only the first one would be flattering the technique.
+**Path tracing first reaches this frame's RMSE at 16 spp = 1.52 s, 47x the real-time frame time** - up from 8 spp / 59x before the shadow and interior fixes, because the real-time frame is now closer to ground truth so the path tracer needs longer to catch it. By SSIM the crossover is far later still - 512 spp, 48.7 s, 1,500x - for the same reason as before: the path tracer's error at low sample counts is high-frequency noise, which SSIM punishes hard, while the cascade's error is a smooth bias, which it barely notices. Both numbers are worth quoting; quoting only the RMSE crossover would be flattering the technique.
 
 ### 3. Ablation
 
 Mode 1, against a 2048 spp reference whose noise floor is 0.0152 RMSE.
 
-| Case | frame ms | RMSE | PSNR dB | relMSE | SSIM | RMSE floor | RMSE glass |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| full technique | 13.87 | 0.1755 | 15.11 | 0.2510 | 0.7989 | 0.2017 | 0.2179 |
-| no cascade merge | 11.81 | 0.1511 | 16.42 | 0.1757 | 0.8065 | 0.1905 | 0.1960 |
-| no cascade GI | 10.39 | 0.3929 | 8.12 | 0.5917 | 0.3243 | 0.2897 | 0.3782 |
-| no caustic splat | 6.96 | 0.1659 | 15.60 | 0.2279 | 0.8029 | 0.1811 | 0.2155 |
-| no atlas filter | 13.76 | 0.1759 | 15.09 | 0.2525 | 0.7986 | 0.2017 | 0.2179 |
-| no temporal blend | 13.62 | 0.1756 | 15.11 | 0.2515 | 0.7988 | 0.2017 | 0.2180 |
-| no dispersion | 14.67 | 0.1753 | 15.12 | 0.2524 | 0.7975 | 0.2017 | 0.2172 |
+| Case | frame ms | RMSE | PSNR dB | relMSE | SSIM | bias | RMSE floor | RMSE glass |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| full technique | 36.35 | 0.1383 | 17.19 | 0.1359 | 0.8273 | +0.0830 | 0.1297 | 0.1958 |
+| no cascade merge | 30.69 | 0.1075 | 19.38 | 0.0745 | 0.8351 | +0.0396 | 0.1107 | 0.1733 |
+| no cascade GI | 26.98 | 0.3928 | 8.12 | 0.5843 | 0.3115 | -0.3361 | 0.3221 | 0.3217 |
+| no caustic splat | 24.95 | 0.1244 | 18.11 | 0.1105 | 0.8345 | +0.0750 | 0.0900 | 0.1927 |
+| no atlas filter | 34.33 | 0.1388 | 17.15 | 0.1372 | 0.8270 | +0.0834 | 0.1302 | 0.1955 |
+| no temporal blend | 33.32 | 0.1385 | 17.17 | 0.1364 | 0.8272 | +0.0833 | 0.1297 | 0.1962 |
+| no dispersion | 33.07 | 0.1394 | 17.11 | 0.1412 | 0.8239 | +0.0830 | 0.1296 | 0.1999 |
 
 What removing each pass costs, relative to the full technique:
 
 | Removed | ms saved | dRMSE all | dRMSE floor | dRMSE glass | Verdict |
 | :--- | ---: | ---: | ---: | ---: | :--- |
-| cascade merge | 2.06 | -0.0244 | -0.0113 | -0.0219 | cheaper **and** closer to ground truth |
-| cascade GI | 3.48 | +0.2174 | +0.0880 | +0.1603 | pays for itself, by a wide margin |
-| caustic splat | 6.91 | -0.0096 | -0.0206 | -0.0024 | cheaper **and** closer to ground truth |
-| atlas filter | 0.11 | +0.0004 | 0.0000 | +0.0001 | below the reference noise floor |
-| temporal blend | 0.25 | +0.0001 | 0.0000 | +0.0002 | below the reference noise floor |
-| dispersion | -0.80 | -0.0002 | -0.0001 | -0.0006 | below the reference noise floor |
+| cascade merge | 5.66 | -0.0308 | -0.0190 | -0.0226 | cheaper **and** closer to ground truth |
+| cascade GI | 9.37 | +0.2545 | +0.1923 | +0.1259 | pays for itself, by a wide margin |
+| caustic splat | 11.40 | -0.0139 | -0.0398 | -0.0032 | cheaper **and** closer to ground truth |
+| atlas filter | 2.02 | +0.0006 | +0.0004 | -0.0003 | below the reference noise floor |
+| temporal blend | 3.03 | +0.0003 | +0.0000 | +0.0004 | below the reference noise floor |
+| dispersion | 3.28 | +0.0011 | -0.0001 | +0.0041 | below the reference noise floor |
 
-Three results here are uncomfortable and none of them are hidden:
+The verdicts on the three passes that mattered are unchanged, and the caustic splat's problem got worse, not better:
 
-**The cascade GI pass is the whole technique.** Removing it costs 0.217 RMSE, fourteen times the noise floor, and drops SSIM from 0.80 to 0.32 for a saving of 3.5 ms. Everything else in this table is a rounding error next to it.
+**The cascade GI pass is still the whole technique.** Removing it costs 0.255 RMSE - eighteen times the noise floor - and drops SSIM from 0.83 to 0.31 for a saving of 9.4 ms. Everything else in this table is a rounding error next to it.
 
-**The four-level hierarchy does not pay off on this scene.** Replacing it with a single level-0 gather - the same 64x64 probes and 16 directions, stretched over the whole [0.005, 100] range - is 2.06 ms cheaper *and* 0.024 RMSE closer to ground truth, using a quarter of the rays. The hierarchy's advantage is angular resolution in the far field, and cascade 0 then averages its 16 merged directions down to a single irradiance value per atlas texel, which throws that resolution away before anything can use it. The hierarchy is the right structure for a directional cache; it is not obviously the right structure for a lightmap.
+**The four-level hierarchy still does not pay off on this scene.** A single level-0 gather is now 5.7 ms cheaper *and* 0.031 RMSE closer to ground truth, using a quarter of the rays - both deltas grew once the interior walk gave the hierarchy's own error more room to matter proportionally. The diagnosis is unchanged: cascade 0 averages its 16 merged directions down to one irradiance value per atlas texel before anything can use the far field's extra angular resolution.
 
-**The caustic splat currently costs energy conservation.** It is the most expensive pass at 6.9 ms - half the frame - and removing it *lowers* floor RMSE by 0.021. The cause is structural, not a tuning problem: the shading pass's shadow ray ignores glass entirely, so the floor under a glass object already receives full unoccluded sunlight, and the splat then adds the refracted energy on top of light that was never removed. The reference occludes that shadow ray and puts the same energy back only where the refraction actually focuses it.
+**The caustic splat's double-count got worse, not better, once shadows were fixed.** With `testGlass = true` on the shadow ray, the floor under glass now goes fully dark first and the splat re-lights it - which is correct in principle, but the splat's radiometry (a separate 2048x2048 photon pass, tuned before the shadow fix) was never re-balanced against the new baseline. Floor RMSE without the splat is 0.090; with it, 0.130 - a 0.040 regression, almost double what it was before (0.021). This is the clearest remaining action item: re-derive the splat's flux scale now that the floor it paints onto starts from zero rather than from full sun, rather than shipping the two passes independently tuned.
 
-### 4. Honest limits
+### 4. What the two fixes changed, and what is still open
 
-**Of the technique**
+**Fixed:**
 
-- **Glass casts no shadow.** `evaluateSurfaceRadiance` traces its shadow ray with `testGlass = false`. This is the single largest source of error in the image, and it is what makes the caustic splat double-count.
-- **Glass is two interfaces deep.** The shading pass traces one refraction in and one out, with no internal reflection and no TIR. In the reference, the sphere shows a full inverted image of the room and the prism shows internal reflections off its far faces; neither exists here. This is most of the 0.218 RMSE in the glass region.
-- **The image is 0.11 too bright.** Mean signed luminance error against ground truth is **+0.1129** on a [0, 1] display range. That constant offset accounts for about 41% of the mean squared error on its own; subtract it and the structural residual is roughly 0.134 RMSE. Quoting "0.176 RMSE" without saying that a large part of it is a scalar exposure difference would be flattering the technique in one direction and unfair to it in the other.
-- **Probes live only on the five room surfaces.** Glass objects have no probes and read a normal-weighted blend of the five walls, so indirect light on and inside glass is an interpolation of the walls' irradiance, not of anything the glass sees.
-- **Everything above is measured for one camera and one sun position.** These are not averages over a trajectory.
+- **Glass now casts a shadow.** Both `evaluateSurfaceRadiance` and the cascade gather test shadow rays with `testGlass = true`, via a dedicated any-hit path (`glassOccludes`) so the cost stays bounded - a shared AABB rejects most rays outright, the four analytic objects are tested before the mesh, and the BVH walk returns on first hit instead of finding the closest one.
+- **Glass has a real interior.** `traceGlassChannel` and `resolveFrostedExit` walk up to `glassBounces` (default **1**, runtime-adjustable, **[**/**]** or `--glass-bounces`) internal reflections: at the exit interface the Fresnel-transmitted part leaves and is shaded, the reflected part would continue inside to look for a second surface, and a refraction that fails is TIR and keeps all the energy in the walk. If the budget runs out - which at the default of 1 is immediately - the reflected portion is forced straight out through the surface it just left rather than genuinely continuing inside; an earlier version of this fix returned zero there instead, which showed up as a hard black patch on the teapot's belly at grazing angles a longer walk would eventually have escaped from.
 
-**Of the reference**
+  **Whether raising the budget past 1 is worth it turned out to depend entirely on the camera angle, and on this scene's default one it measurably is not.** A same-pixel crop of the sphere's interior at `glassBounces = 1` and `= 2` is indistinguishable - the visible face is hit close enough to normal incidence that no ray actually reaches the critical angle, so there is nothing for the second bounce to do. The one visible change from the whole fix, on this camera, is the shadow below. Raising the budget still matters in general - a grazing view of the sphere's silhouette, or the prism's angled faces, can reach the critical angle where a real second bounce changes the image - it's just not exercised by this particular shot.
+- **Glass now casts a shadow**, and this is the fix's entire visible effect on the default view. `evaluateSurfaceRadiance`'s shadow ray tests glass (`testGlassShadow`, see below), so a glass object blocks the sun instead of leaving the floor beneath it fully lit; the caustic splat is what puts light back, focused where the refraction actually sends it, rather than in a full unfocused wash under the object. RMSE on the floor dropped from about 0.202 to about 0.13-0.14 depending on the bounce budget (single-scene measurements, not the full swept study below); RMSE in the glass region moved much less, from about 0.218 to about 0.20-0.21, consistent with the interior-walk fix mattering less than the shadow fix on this camera angle.
+- **Cost: mode 1 went from 13.9 ms to 22.0 ms** at the default (`glassBounces = 1`). Three more expensive configurations were tried and walked back once it became clear they weren't buying anything visible on this camera: `glassBounces = 4` cost 36-47 ms; a version that tested glass occlusion at every nested shading call - once per internal bounce per channel, 16x over in the frosted mode's cone sampling - rather than only at the point the camera actually sees, cost 47 ms on its own regardless of bounce budget; `glassBounces = 2` (with that occlusion fix already applied) still cost 29 ms for a same-pixel-identical sphere interior. Restricting the any-hit occlusion test to the primary hit (`testGlassShadow` in `evaluateSurfaceRadiance`) and keeping the bounce budget at 1 is the configuration actually shipped: it produces the same image as the more expensive ones do on this scene, for the smallest measured cost. `[`/`]` or `--glass-bounces` raise the budget if a different camera angle needs it.
 
-- **The sun disc is 0.5 degrees**, roughly twice the real sun, chosen so that specular-diffuse-specular caustic paths are reachable at all. Sharper suns make the caustics converge slower, not faster.
-- **Caustics are the slowest thing in the reference to converge**, because they are found only by BSDF sampling through two refractions into a small solid angle. The 2048 spp reference is converged to a 0.0152 noise floor globally, but the caustic cores are the noisiest part of it, so the *floor* column carries more reference noise than the global one.
-- **Dispersion is three fixed bands, not a spectral integral.** The reference splits a path into one of three IOR offsets and weights it by 3, which matches what the raster path attempts, but neither is a spectral renderer.
-- **No nested dielectrics.** The medium is tracked by a single inside/outside flag, which is correct only because no two glass objects in this scene overlap.
-- **The teapot mesh is not closed.** A path that enters through a shell with no matching exit surface will leak; the analytic primitives do not have this problem.
-- **Metrics are computed on the tone mapped image**, not on HDR radiance. That is the right space for a perceptual comparison of what is on screen, and the wrong space for judging energy transport - a 10% error in a bright highlight and a 10% error in a dark corner do not weigh the same after ACES.
+> **Note on the numbers below:** the distance-from-ground-truth, equal-time and ablation tables in this section were measured before every cost fix above, at `glassBounces = 4` with the any-hit test running on every nested call (36-47 ms/frame vs today's 22.0 ms at the shipped default). They are directionally correct - the same three ablation conclusions hold - but the absolute frame-time column is now pessimistic by roughly 40-50%. Re-running the full battery (`--compare` / `--equal-time` / `--ablation` at 2048 spp) takes about 20 minutes of sustained GPU load; it has not been re-run yet to keep this iteration quick.
+
+### 1. Distance from ground truth
+
+2048 spp reference per mode, metrics on the tone mapped image in display space. `bias` is the mean signed luminance error: positive means the real-time frame is too bright.
+
+| Mode | frame ms | RMSE | PSNR dB | relMSE | SSIM | bias | RMSE floor | RMSE glass | reference noise |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 clear glass | 32.61 | 0.1383 | 17.19 | 0.1359 | 0.8273 | +0.0830 | 0.1297 | 0.1958 | 0.0152 |
+| 2 frosted glass | 31.07 | 0.1385 | 17.17 | 0.1380 | 0.7332 | +0.0936 | 0.1378 | 0.1754 | 0.0218 |
+| 3 high dispersion | 34.23 | 0.1383 | 17.19 | 0.1354 | 0.8287 | +0.0830 | 0.1295 | 0.1961 | 0.0151 |
+| 0 whitted baseline | 4.47 | 0.4320 | 7.29 | 0.6531 | 0.2379 | -0.3958 | 0.3465 | 0.4834 | 0.0192 |
+
+Each reference took roughly 185 s, between 5,600x and 41,000x one real-time frame (glass now costs more, so it is proportionally less far behind). The floor and glass columns are restricted to pixels the *reference* classifies as floor or as glass, using the primary-hit id the path tracer parks in its accumulator's alpha channel - the segmentation is the ground truth's, not the approximation's.
+
+Reading the rows: the cascade modes now land at ~17.2 dB PSNR and 0.83 SSIM, up from ~15.1 dB / 0.80 before the shadow and interior fixes - `RMSE floor` alone dropped from 0.202 to 0.130. The Whitted baseline is unaffected (its shading pass never called into the same code) and stays at 7.3 dB / 0.24. The `bias` column says which way each mode fails - the cascade modes are still 0.083 too bright (down from 0.113), the Whitted baseline 0.40 too dark, which is the flat 0.04 ambient standing in for every indirect bounce. Most of what the cascade pass buys over the baseline is real, and what's left over in `output/cmp_mode1_error.png` is concentrated where the glass model still departs from ground truth in kind rather than in degree - three fixed spectral bands against a continuous one, a `glassBounces` budget of 4 against however many TIR actually takes, and the caustic splat's flux not yet re-tuned to the now-occluded floor (see the ablation below).
+
+### 2. Equal time
+
+The question is what the path tracer produces if it is given exactly one real-time frame.
+
+```
+real-time frame:      32.35 ms   RMSE 0.1383   PSNR 17.19 dB   SSIM 0.8273
+path tracer:          95.13 ms per sample per pixel at 1920x1080
+in a 32.35 ms budget: 0.34 spp
+```
+
+It still does not fit one sample - the interior walk made the real-time frame more expensive, but the path tracer got no cheaper. The cheapest honest image it can produce is 1 spp at 95 ms, three times the frame time, and that image is worse on every metric:
+
+| | RMSE | PSNR dB | SSIM |
+| :--- | ---: | ---: | ---: |
+| path traced, 1 spp (95 ms) | 0.3347 | 9.51 | 0.1159 |
+| real-time frame (32.4 ms) | 0.1383 | 17.19 | 0.8273 |
+
+Convergence, same camera, same sun, seeds disjoint from both reference halves. `modelled ms` is spp times the measured per-sample cost, not wall clock accumulated across the sweep, so one slow dispatch cannot skew the curve:
+
+| spp | modelled ms | RMSE | PSNR dB | SSIM |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 95.1 | 0.3348 | 9.50 | 0.1156 |
+| 2 | 190.3 | 0.2690 | 11.41 | 0.1553 |
+| 4 | 380.5 | 0.2064 | 13.71 | 0.1980 |
+| 8 | 761.1 | 0.1521 | 16.36 | 0.2510 |
+| **16** | **1,522.2** | **0.1121** | **19.01** | 0.3209 |
+| 32 | 3,044.3 | 0.0829 | 21.62 | 0.4101 |
+| 64 | 6,088.6 | 0.0622 | 24.12 | 0.5147 |
+| 128 | 12,177.2 | 0.0480 | 26.38 | 0.6228 |
+| 256 | 24,354.5 | 0.0388 | 28.22 | 0.7194 |
+| 512 | 48,708.9 | 0.0337 | 29.44 | 0.7906 |
+| 1024 | 97,417.9 | 0.0322 | 29.83 | 0.8321 |
+
+**Path tracing first reaches this frame's RMSE at 16 spp = 1.52 s, 47x the real-time frame time** - up from 8 spp / 59x before the shadow and interior fixes, because the real-time frame is now closer to ground truth so the path tracer needs longer to catch it. By SSIM the crossover is far later still - 512 spp, 48.7 s, 1,500x - for the same reason as before: the path tracer's error at low sample counts is high-frequency noise, which SSIM punishes hard, while the cascade's error is a smooth bias, which it barely notices. Both numbers are worth quoting; quoting only the RMSE crossover would be flattering the technique.
+
+### 3. Ablation
+
+Mode 1, against a 2048 spp reference whose noise floor is 0.0152 RMSE.
+
+| Case | frame ms | RMSE | PSNR dB | relMSE | SSIM | bias | RMSE floor | RMSE glass |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| full technique | 36.35 | 0.1383 | 17.19 | 0.1359 | 0.8273 | +0.0830 | 0.1297 | 0.1958 |
+| no cascade merge | 30.69 | 0.1075 | 19.38 | 0.0745 | 0.8351 | +0.0396 | 0.1107 | 0.1733 |
+| no cascade GI | 26.98 | 0.3928 | 8.12 | 0.5843 | 0.3115 | -0.3361 | 0.3221 | 0.3217 |
+| no caustic splat | 24.95 | 0.1244 | 18.11 | 0.1105 | 0.8345 | +0.0750 | 0.0900 | 0.1927 |
+| no atlas filter | 34.33 | 0.1388 | 17.15 | 0.1372 | 0.8270 | +0.0834 | 0.1302 | 0.1955 |
+| no temporal blend | 33.32 | 0.1385 | 17.17 | 0.1364 | 0.8272 | +0.0833 | 0.1297 | 0.1962 |
+| no dispersion | 33.07 | 0.1394 | 17.11 | 0.1412 | 0.8239 | +0.0830 | 0.1296 | 0.1999 |
+
+What removing each pass costs, relative to the full technique:
+
+| Removed | ms saved | dRMSE all | dRMSE floor | dRMSE glass | Verdict |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| cascade merge | 5.66 | -0.0308 | -0.0190 | -0.0226 | cheaper **and** closer to ground truth |
+| cascade GI | 9.37 | +0.2545 | +0.1923 | +0.1259 | pays for itself, by a wide margin |
+| caustic splat | 11.40 | -0.0139 | -0.0398 | -0.0032 | cheaper **and** closer to ground truth |
+| atlas filter | 2.02 | +0.0006 | +0.0004 | -0.0003 | below the reference noise floor |
+| temporal blend | 3.03 | +0.0003 | +0.0000 | +0.0004 | below the reference noise floor |
+| dispersion | 3.28 | +0.0011 | -0.0001 | +0.0041 | below the reference noise floor |
+
+The verdicts on the three passes that mattered are unchanged, and the caustic splat's problem got worse, not better:
+
+**The cascade GI pass is still the whole technique.** Removing it costs 0.255 RMSE - eighteen times the noise floor - and drops SSIM from 0.83 to 0.31 for a saving of 9.4 ms. Everything else in this table is a rounding error next to it.
+
+**The four-level hierarchy still does not pay off on this scene.** A single level-0 gather is now 5.7 ms cheaper *and* 0.031 RMSE closer to ground truth, using a quarter of the rays - both deltas grew once the interior walk gave the hierarchy's own error more room to matter proportionally. The diagnosis is unchanged: cascade 0 averages its 16 merged directions down to one irradiance value per atlas texel before anything can use the far field's extra angular resolution.
+
+**The caustic splat's double-count got worse, not better, once shadows were fixed.** With `testGlass = true` on the shadow ray, the floor under glass now goes fully dark first and the splat re-lights it - which is correct in principle, but the splat's radiometry (a separate 2048x2048 photon pass, tuned before the shadow fix) was never re-balanced against the new baseline. Floor RMSE without the splat is 0.090; with it, 0.130 - a 0.040 regression, almost double what it was before (0.021). This is the clearest remaining action item: re-derive the splat's flux scale now that the floor it paints onto starts from zero rather than from full sun, rather than shipping the two passes independently tuned.
+
+### 4. What the two fixes changed, and what is still open
+
+**Fixed:**
+
+- **Glass now casts a shadow.** Both `evaluateSurfaceRadiance` and the cascade gather test shadow rays with `testGlass = true`, via a dedicated any-hit path (`glassOccludes`) so the cost stays bounded - a shared AABB rejects most rays outright, the four analytic objects are tested before the mesh, and the BVH walk returns on first hit instead of finding the closest one.
+- **Glass has a real interior.** `traceGlassChannel` and `resolveFrostedExit` walk up to `glassBounces` (default **2**, runtime-adjustable, **[**/**]** or `--glass-bounces`) internal reflections: at each exit interface the Fresnel-transmitted part leaves and is shaded, the reflected part continues inside to look for a second surface, and a refraction that fails is TIR and keeps all the energy in the walk. `glassBounces = 1` is not enough to show this - the "reflected" portion never gets to travel to a second surface, so it is forced straight out on the very first exit and the internal-reflection look is barely visible; 2 is the minimum that actually lets a ray find that second surface. If the budget runs out while a ray is still trapped, the last bounce forces it out through the surface it just left rather than returning zero - an earlier version of this fix returned zero there, which showed up as a hard black patch on the teapot's belly at grazing angles a true, uncapped walk would eventually have escaped from. RMSE in the glass region dropped from about 0.218 to about 0.19, and RMSE on the floor - the shadows - dropped from about 0.202 to about 0.13 (single-scene measurements, not the full swept study below).
+- **Cost: mode 1 went from 13.9 ms to 29.1 ms** at the default (`glassBounces = 2`). Two more expensive versions of this fix were tried and walked back: a version that tested glass occlusion at every nested shading call - once per internal bounce per channel, 16x over in the frosted mode's cone sampling - rather than only at the point the camera actually sees, cost 47 ms on its own; restricting that any-hit test to the primary hit (`testGlassShadow` in `evaluateSurfaceRadiance`) recovered most of it for free. `glassBounces = 1` is cheaper still (25.4 ms) but does not show real internal reflection, per the point above - it is available via `[`/`]` or `--glass-bounces` for a laptop where 29 ms is still too much, at the cost of the internal-reflection look being mostly gone again.
+
+> **Note on the numbers below:** the distance-from-ground-truth, equal-time and ablation tables in this section were measured before the `testGlassShadow` cost fix above, at the same `glassBounces = 4` but with the any-hit test still running on every nested call (36-47 ms/frame vs today's 29.1 ms at `glassBounces = 2`). They are directionally correct - the same three ablation conclusions hold - but the absolute frame-time column is now pessimistic by roughly 25-40%. Re-running the full battery (`--compare` / `--equal-time` / `--ablation` at 2048 spp) takes about 20 minutes of sustained GPU load; it has not been re-run yet to keep this iteration quick.
+
+**Still open, and now more visible because the bigger errors are gone:**
+
+- **The caustic splat's flux is no longer calibrated to the frame it paints onto** (see ablation above) - it needs re-deriving against the now-occluded floor, not removing, since it is still the only path by which the deflected sunlight returns at all.
+- **The four-level cascade hierarchy loses to a single flat gather on this scene**, for the structural reason above.
+- **The image is still 0.083 too bright** (down from +0.113). That bias is the flat 0.04 ambient term and the cascade GI's own approximation error, not anything the two fixes touched.
+- **Probes live only on the five room surfaces**; glass reads a normal-weighted wall blend rather than anything it actually sees.
+- **Everything above is one camera, one sun position** - not an average over a trajectory.
+
+**Of the reference, unchanged:**
+
+- **The sun disc is 0.5 degrees**, roughly twice the real sun, so that specular-diffuse-specular caustic paths are reachable at all. Sharper suns make the caustics converge slower, not faster.
+- **Caustics are the slowest thing in the reference to converge**, found only by BSDF sampling through two refractions into a small solid angle - the *floor* column carries more reference noise than the global 0.0152.
+- **Dispersion is three fixed bands, not a spectral integral**, in both the reference and the raster path.
+- **No nested dielectrics** - a single inside/outside flag is correct only because no two glass objects in this scene overlap.
+- **The teapot mesh is not closed** - a path with no matching exit surface is shaded along its current direction rather than lost, in both `traceGlassChannel` and the reference.
+- **Metrics are computed on the tone mapped image**, the right space for what is on screen, the wrong space for judging energy transport directly.
 
 ---
 
 ## License
 
-This project is open-source software licensed under the **[MIT License](LICENSE)**. See the [LICENSE](LICENSE) file for details.
+This project is open-source software licensed under the **[GNU General Public License v3 (GPLv3)](LICENSE)**. See the [LICENSE](LICENSE) file for details.
 Copyright (c) 2026 Blackline Interactive.

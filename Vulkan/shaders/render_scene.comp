@@ -53,7 +53,6 @@ vec3 sampleIrradianceAtlas(HitRecord hit) {
         return sampleSurfaceAtlas(4u, u, v);
     }
 
-    // 3D objects in the room (Teapot, sphere, cylinder, prism)
     float u_xz = (hit.position.x - kRoomMinX) / (kRoomMaxX - kRoomMinX);
     float v_xz = (hit.position.z - kRoomMinZ) / (kRoomMaxZ - kRoomMinZ);
 
@@ -267,14 +266,12 @@ void main() {
                         vec3 uVec = normalize(cross(wT, upVec));
                         vec3 vVec = cross(wT, uVec);
 
-                        // High-frequency per-pixel rotation using Interleaved Gradient Noise (IGN)
                         vec3 ignMagic = vec3(0.06711056, 0.00583715, 52.9829189);
                         float ign = fract(ignMagic.z * fract(dot(vec2(tid), ignMagic.xy)));
                         float phi = ign * 6.283185307;
                         float cosPhi = cos(phi);
                         float sinPhi = sin(phi);
 
-                        // 16-sample Vogel's disk (golden ratio spiral) with Gaussian radial weighting
                         const int kSamples = 16;
                         vec3 accumRad = vec3(0.0);
                         float weightSum = 0.0;
@@ -283,7 +280,6 @@ void main() {
                             float theta = float(s) * 2.39996323;
                             float r = sqrt((float(s) + 0.5) / float(kSamples));
 
-                            // Rotated disc offset
                             float unrotX = r * cos(theta);
                             float unrotY = r * sin(theta);
                             float rotX = unrotX * cosPhi - unrotY * sinPhi;
@@ -292,7 +288,6 @@ void main() {
                             vec2 off = vec2(rotX, rotY) * coneAngle;
                             vec3 sampleDir = normalize(wT + off.x * uVec + off.y * vVec);
 
-                            // Smooth Gaussian-like weight to prevent harsh disc edges
                             float weight = exp(-1.2 * r * r);
 
                             Ray coneRay;

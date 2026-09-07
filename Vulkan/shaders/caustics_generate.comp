@@ -23,7 +23,6 @@ layout(std430, set = 0, binding = 3) buffer CausticBuffer {
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-// Photon flux is accumulated in fixed point so the splat can be atomic.
 const float kFixedScale = 1000000000.0;
 
 void splatBilinear(float hitFloorX, float hitFloorZ, float flux, uint ch) {
@@ -94,7 +93,6 @@ void main() {
         float cosTheta1 = clamp(-dot(lightDir, N1), 0.0, 1.0);
         float rayWeight = (4.0 * kSphereRadius * kSphereRadius / float(1024 * 1024)) * uniforms.sunIntensity;
 
-        // Matches the sphere's scene material (ior 1.62, dispersion 0.040).
         float disp = (uniforms.renderMode == 3u) ? 0.060 : 0.040;
         vec3 iors = vec3(1.62 - disp, 1.62, 1.62 + disp);
 
@@ -140,7 +138,7 @@ void main() {
 
     if (quadrant == 1u) {
         if (uniforms.numTeapotNodes == 0u) return;
-        // Covers the mesh's XZ diagonal (bounds are +-0.664 x +-0.413).
+
         float objRadius = 0.78;
         float sx = (uv.x - 0.5) * (2.0 * objRadius);
         float sy = (uv.y - 0.5) * (2.0 * objRadius);
@@ -273,7 +271,6 @@ void main() {
         return;
     }
 
-    // Quadrant 3: Triangular prism dispersion
     {
         float objRadius = kPrismSide * 0.75;
         float sx = (uv.x - 0.5) * (2.0 * objRadius);

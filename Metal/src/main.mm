@@ -21,16 +21,12 @@ struct CascadeLevelParams {
     float tMin;
     float tMax;
     uint32_t raysThisLevel;
-    uint32_t raysUpperLevel;          // 0 marks the terminal (farthest) cascade.
+    uint32_t raysUpperLevel;
     uint32_t probesPerAxisThisLevel;
-    uint32_t probesPerAxisUpperLevel; // unused when raysUpperLevel == 0
+    uint32_t probesPerAxisUpperLevel;
     float skyBoost;
 };
 
-// Cascade N covers [kCascadeRanges[N], kCascadeRanges[N+1]] along a ray, gathered
-// over a probesPerAxis x probesPerAxis grid with `rays` directions per probe.
-// Ray count quadruples per level (matching the 4x drop in probe density) so the
-// total ray budget - probes^2 * rays - is the same at every level.
 struct CascadeLevelSpec {
     uint32_t probesPerAxis;
     uint32_t rays;
@@ -70,7 +66,6 @@ struct GlassUniforms {
     uint32_t glassBounces;
 };
 
-// Mirrors PathTraceParams in RCGlassShaders.metal.
 struct PathTraceParams {
     uint32_t samplesPerLaunch;
     uint32_t sampleBase;
@@ -82,15 +77,13 @@ struct PathTraceParams {
     uint32_t seedOffset;
 };
 
-// Ablation bits. Bits 0, 1, 3 and 5 are read by the shader; bits 2 and 4 are
-// acted on here, since they change which passes are dispatched at all.
 enum AblationBit : uint32_t {
-    kAblCascadeGI    = 1u << 0,  // cascade irradiance -> flat 0.04 ambient
-    kAblCaustics     = 1u << 1,  // forward-splatted floor caustics
-    kAblAtlasFilter  = 1u << 2,  // 7x7 Gaussian over the probe atlas
-    kAblTemporal     = 1u << 3,  // 0.70 history blend on the atlas
-    kAblCascadeMerge = 1u << 4,  // 4-level hierarchy -> one flat level 0 gather
-    kAblDispersion   = 1u << 5,  // per-channel IOR split
+    kAblCascadeGI    = 1u << 0,
+    kAblCaustics     = 1u << 1,
+    kAblAtlasFilter  = 1u << 2,
+    kAblTemporal     = 1u << 3,
+    kAblCascadeMerge = 1u << 4,
+    kAblDispersion   = 1u << 5,
     kAblAll          = 0x3Fu
 };
 
@@ -166,7 +159,7 @@ struct RendererState {
     id<MTLTexture> cascadeTex[4];
     id<MTLTexture> dummyCascadeTexture;
     id<MTLBuffer> cascadeParamsBuffer[4];
-    id<MTLBuffer> cascadeParamsSingle;   // level 0 stretched over the whole range, for the merge ablation
+    id<MTLBuffer> cascadeParamsSingle;
     id<MTLTexture> causticTexture;
     id<MTLBuffer> causticBuffer;
     size_t causticBufferSize = 0;
@@ -195,8 +188,10 @@ struct RendererState {
 
     uint32_t currentWidth = 1280;
     uint32_t currentHeight = 720;
-    // Path-traced reference (mode 4). The accumulation buffer is progressive:
-    // it keeps integrating until something invalidates it.
+    uint32_t targetRenderWidth = 0;
+    uint32_t targetRenderHeight = 0;
+    bool forceFixedResolution = false;
+
     id<MTLTexture> ptAccumTexture;
     id<MTLBuffer> ptParamsBuffer;
     uint32_t ptSampleCount = 0;
@@ -206,14 +201,13 @@ struct RendererState {
     float ptSunAngularRadiusDeg = 0.5f;
     float ptIndirectClamp = 0.0f;
     uint32_t ptSeedOffset = 0;
-    uint32_t ptOpticsMode = 1;   // which mode's optics the reference should model
+    uint32_t ptOpticsMode = 1;
     uint32_t ablationMask = kAblAll;
-    // How many internal reflections a refracted ray may make inside a dielectric
-    // before the remaining energy is dropped. 1 is the old single-pair behaviour.
-    uint32_t glassBounces = 4;
 
-    uint32_t brightnessMode = 2; // 6 modes: 0..5 (0.8x, 1.8x, 2.8x, 4.2x, 6.5x, 10.0x)
-    uint32_t lightColorMode = 0; // 3 modes: 0 (Normal), 1 (Smooth RGB), 2 (Stepped RGB)
+    uint32_t glassBounces = 1;
+
+    uint32_t brightnessMode = 2;
+    uint32_t lightColorMode = 0;
     float animTime = 0.0f;
 };
 
@@ -227,8 +221,6 @@ static std::string resolveExistingPath(const std::vector<std::string> &candidate
     return candidates.empty() ? "" : candidates[0];
 }
 
-// Private textures come back with undefined contents, and both the irradiance
-// atlas and the caustic target are read before they are first fully written.
 static void clearTextures(RendererState &state, NSArray<id<MTLTexture>> *textures) {
     id<MTLCommandBuffer> cmd = [state.commandQueue commandBuffer];
     for (id<MTLTexture> tex in textures) {
@@ -334,12 +326,6 @@ bool initMetal(RendererState &state, const std::string &shaderPath, const std::s
     state.irradianceAtlas = [state.device newTextureWithDescriptor:atlasDesc];
     state.filteredIrradianceAtlas = [state.device newTextureWithDescriptor:atlasDesc];
 
-    // One array texture per cascade level (5 slices, one per room surface),
-    // sized probesPerAxis x probesPerAxis probes with `rays` directions packed
-    // per probe along X. A single (non-array) texture would exceed Metal's
-    // 16384-wide limit at the coarser levels once the ray count grows large.
-    // Each is fully overwritten by cascadeGatherKernel every frame, so unlike
-    // the atlas textures above they don't need a startup clear.
     for (int level = 0; level < 4; level++) {
         const CascadeLevelSpec &spec = kCascadeLevelSpecs[level];
         uint32_t w = spec.probesPerAxis * spec.rays;
@@ -374,8 +360,6 @@ bool initMetal(RendererState &state, const std::string &shaderPath, const std::s
                                                                      options:MTLResourceStorageModeShared];
     }
 
-    // Cascade ablation: level 0's probe grid and ray count, but covering the
-    // whole [0.005, 100] range in one gather with nothing above it to merge.
     {
         CascadeLevelParams single;
         single.tMin = kCascadeRanges[0];
@@ -460,8 +444,6 @@ static void resetPathTraceAccumulation(RendererState &state) {
     state.ptSampleCount = 0;
 }
 
-// The reference accumulates in its own full-precision buffer, so it has to
-// follow the target's size rather than the drawable's.
 static void ensurePathTraceTarget(RendererState &state, uint32_t width, uint32_t height) {
     if (state.ptAccumTexture &&
         state.ptAccumTexture.width == width &&
@@ -474,8 +456,7 @@ static void ensurePathTraceTarget(RendererState &state, uint32_t width, uint32_t
                                                                                 mipmapped:NO];
     desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
 #if TARGET_OS_OSX
-    // Managed rather than private: the offline comparison reads the raw HDR
-    // accumulation back to compute metrics before tone mapping.
+
     desc.storageMode = MTLStorageModeManaged;
 #endif
     state.ptAccumTexture = [state.device newTextureWithDescriptor:desc];
@@ -517,29 +498,27 @@ void renderFrame(
 
     uniforms.sunDirection = sunDir;
 
-    // 6 brightness levels on 'B': 0.8x, 1.8x, 2.8x (default), 4.2x, 6.5x, 10.0x
     static const float kBrightnessLevels[6] = { 0.8f, 1.8f, 2.8f, 4.2f, 6.5f, 10.0f };
     uniforms.sunIntensity = kBrightnessLevels[state.brightnessMode % 6];
 
-    // 3 color modes on 'C': Normal, Smooth RGB, Stepped RGB
     if (state.lightColorMode == 1) {
-        // Smooth RGB continuous rainbow cycle
+
         float hue = std::fmod(state.animTime * 0.15f, 1.0f);
         uniforms.sunColor = hsvToRgb(hue, 0.90f, 1.0f);
     } else if (state.lightColorMode == 2) {
-        // Stepped sharp RGB switch
+
         static const simd::float3 kStepColors[6] = {
-            simd::make_float3(1.0f, 0.12f, 0.12f),  // Red
-            simd::make_float3(0.12f, 1.0f, 0.12f),  // Green
-            simd::make_float3(0.15f, 0.45f, 1.0f),  // Blue
-            simd::make_float3(1.0f, 0.92f, 0.12f),  // Yellow
-            simd::make_float3(0.12f, 1.0f, 0.95f),  // Cyan
-            simd::make_float3(1.0f, 0.15f, 0.95f)   // Magenta
+            simd::make_float3(1.0f, 0.12f, 0.12f),
+            simd::make_float3(0.12f, 1.0f, 0.12f),
+            simd::make_float3(0.15f, 0.45f, 1.0f),
+            simd::make_float3(1.0f, 0.92f, 0.12f),
+            simd::make_float3(0.12f, 1.0f, 0.95f),
+            simd::make_float3(1.0f, 0.15f, 0.95f)
         };
         int stepIdx = static_cast<int>(state.animTime / 0.85f) % 6;
         uniforms.sunColor = kStepColors[stepIdx];
     } else {
-        // Normal warm sunlight
+
         uniforms.sunColor = simd::make_float3(1.0f, 0.98f, 0.92f);
     }
     uniforms.ambientIntensity = 0.25f;
@@ -562,13 +541,9 @@ void renderFrame(
     id<MTLBuffer> uniformBuffer = state.uniformBuffer;
     memcpy(uniformBuffer.contents, &uniforms, sizeof(GlassUniforms));
 
-    // Mode 4 is the reference: no cascades, no splatting, no atlas - just paths.
     if (state.renderMode == 4) {
         ensurePathTraceTarget(state, width, height);
 
-        // The reference reuses the raster path's optical parameters: which
-        // dispersion strength, and whether the interface is rough. Mode 0 is
-        // single-IOR, so its ablation bit for dispersion is cleared here.
         uniforms.renderMode = state.ptOpticsMode;
         if (state.ptOpticsMode == 0) uniforms.ablationMask &= ~uint32_t(kAblDispersion);
         memcpy(uniformBuffer.contents, &uniforms, sizeof(GlassUniforms));
@@ -611,10 +586,7 @@ void renderFrame(
     const bool splatCaustics   = (state.ablationMask & kAblCaustics) != 0;
 
     if (state.renderMode != 0 && useCascadeGI && state.cascadeGatherPipeline && state.irradianceAtlas) {
-        // Far-to-near: level 3 has nothing above it to read, level 0 reads level 1,
-        // and so on down. Each dispatch covers exactly that level's probe x ray grid.
-        // With the merge ablated away only level 0 runs, stretched over the full
-        // range, which is the flat single-gather this hierarchy replaced.
+
         for (int level = mergeCascades ? 3 : 0; level >= 0; level--) {
             const CascadeLevelSpec &spec = kCascadeLevelSpecs[level];
             id<MTLTexture> upperTex = (level == 3 || !mergeCascades) ? state.dummyCascadeTexture : state.cascadeTex[level + 1];
@@ -900,6 +872,11 @@ static inline SystemMetrics querySystemMetrics(id<MTLDevice> device) {
         self.framebufferOnly = NO;
         gRenderer.lastFrameTime = CACurrentMediaTime();
 
+        if (gRenderer.forceFixedResolution && gRenderer.targetRenderWidth > 0 && gRenderer.targetRenderHeight > 0) {
+            self.autoResizeDrawable = NO;
+            self.drawableSize = CGSizeMake(gRenderer.targetRenderWidth, gRenderer.targetRenderHeight);
+        }
+
         NSRect overlayFrame = NSMakeRect(16, frameRect.size.height - 214 - 16, 410, 214);
         self.statsOverlay = [[RCStatsOverlayView alloc] initWithFrame:overlayFrame];
         self.statsOverlay.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
@@ -1038,15 +1015,15 @@ static inline SystemMetrics querySystemMetrics(id<MTLDevice> device) {
 }
 
 - (void)keyDown:(NSEvent *)event {
-    if (event.keyCode == 31) { // 'O' physical keycode across any keyboard layout
+    if (event.keyCode == 31) {
         [self toggleStatsOverlay];
         return;
     }
-    if (event.keyCode == 11) { // 'B' physical keycode across any keyboard layout
+    if (event.keyCode == 11) {
         [self cycleBrightnessMode];
         return;
     }
-    if (event.keyCode == 8) { // 'C' physical keycode across any keyboard layout
+    if (event.keyCode == 8) {
         [self cycleLightColorMode];
         return;
     }
@@ -1058,22 +1035,22 @@ static inline SystemMetrics querySystemMetrics(id<MTLDevice> device) {
     switch (c) {
         case 'o':
         case 'O':
-        case 0x043E: // Ukrainian Cyrillic 'о'
-        case 0x041E: // Ukrainian Cyrillic 'О'
+        case 0x043E:
+        case 0x041E:
             [self toggleStatsOverlay];
             break;
         case 'b':
         case 'B':
-        case 0x0431: // Ukrainian 'б'
-        case 0x0411: // Ukrainian 'Б'
-        case 0x0438: // Ukrainian 'и' (key B on standard keyboard)
-        case 0x0418: // Ukrainian 'И'
+        case 0x0431:
+        case 0x0411:
+        case 0x0438:
+        case 0x0418:
             [self cycleBrightnessMode];
             break;
         case 'c':
         case 'C':
-        case 0x0441: // Ukrainian 'с'
-        case 0x0421: // Ukrainian 'С'
+        case 0x0441:
+        case 0x0421:
             [self cycleLightColorMode];
             break;
         case ' ':
@@ -1193,7 +1170,26 @@ static inline SystemMetrics querySystemMetrics(id<MTLDevice> device) {
 @implementation AppDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    NSRect frame = NSMakeRect(120, 100, 1280, 720);
+    NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
+    CGFloat winW = 1280.0;
+    CGFloat winH = 720.0;
+
+    if (gRenderer.forceFixedResolution && gRenderer.targetRenderWidth > 0 && gRenderer.targetRenderHeight > 0) {
+        if (screenFrame.size.width >= gRenderer.targetRenderWidth && screenFrame.size.height >= gRenderer.targetRenderHeight) {
+            winW = gRenderer.targetRenderWidth;
+            winH = gRenderer.targetRenderHeight;
+        } else if (screenFrame.size.width >= 1620 && screenFrame.size.height >= 920) {
+            winW = 1600.0;
+            winH = 900.0;
+        } else if (screenFrame.size.width >= 1300 && screenFrame.size.height >= 740) {
+            winW = 1280.0;
+            winH = 720.0;
+        }
+    }
+
+    CGFloat winX = screenFrame.origin.x + std::max<CGFloat>(0.0, (screenFrame.size.width - winW) * 0.5);
+    CGFloat winY = screenFrame.origin.y + std::max<CGFloat>(0.0, (screenFrame.size.height - winH) * 0.5);
+    NSRect frame = NSMakeRect(winX, winY, winW, winH);
     NSUInteger styleMask = NSWindowStyleMaskTitled |
                            NSWindowStyleMaskClosable |
                            NSWindowStyleMaskMiniaturizable |
@@ -1226,9 +1222,9 @@ static inline SystemMetrics querySystemMetrics(id<MTLDevice> device) {
     std::cout << "    [0]                 : Whitted Ray Tracing Baseline\n";
     std::cout << "    [4]                 : Path Traced Reference (progressive ground truth)\n";
     std::cout << "    [+/-]               : Adjust Roughness\n";
-    std::cout << "    [ [ / ] ]           : Internal reflection budget inside glass (1..8)\n";
-    std::cout << "    [B]                 : Cycle Light Brightness (6 Modes: 0.8x -> 10.0x)\n";
-    std::cout << "    [C]                 : Cycle Light Color (Normal -> Smooth RGB -> Step RGB)\n";
+    std::cout << "    [ [ / ] ]           : Internal reflection budget inside glass (1-8)\n";
+    std::cout << "    [B]                 : Cycle Light Brightness (6 Modes: 0.8x - 10.0x)\n";
+    std::cout << "    [C]                 : Cycle Light Color (Normal - Smooth RGB - Step RGB)\n";
     std::cout << "    [O]                 : Toggle Hardware & Performance Stats Overlay\n";
     std::cout << "    [R]                 : Reset Camera\n";
     std::cout << "    [S]                 : Screenshot (1080p)\n";
@@ -1241,16 +1237,6 @@ static inline SystemMetrics querySystemMetrics(id<MTLDevice> device) {
 
 @end
 
-// ---------------------------------------------------------------------------
-// Reference comparison tooling
-//
-// Everything below exists to answer four questions about the real-time modes:
-// how far they are from a path traced ground truth, how much path tracing fits
-// in the same wall clock, what each individual pass is worth, and where the
-// approximation stops being defensible. It runs offline, never in the interactive
-// loop.
-// ---------------------------------------------------------------------------
-
 struct ImageBuffer {
     uint32_t width = 0;
     uint32_t height = 0;
@@ -1258,7 +1244,7 @@ struct ImageBuffer {
 };
 
 struct ImageMetrics {
-    double bias = 0.0;   // mean signed luminance error: positive means too bright
+    double bias = 0.0;
     double rmse = 0.0;
     double psnr = 0.0;
     double relMse = 0.0;
@@ -1299,7 +1285,6 @@ static void renderFrames(RendererState &state, id<MTLTexture> target, int frames
     }
 }
 
-// Renders one more frame and pulls the result back to the CPU.
 static ImageBuffer captureFrame(RendererState &state, id<MTLTexture> target) {
     id<MTLCommandBuffer> cmd = [state.commandQueue commandBuffer];
     renderFrame(state, target, cmd, 0.016f);
@@ -1355,7 +1340,6 @@ static std::vector<float> lumaOf(const ImageBuffer &img) {
     return l;
 }
 
-// Separable Gaussian, used only by the SSIM windows.
 static std::vector<float> gaussianBlur(const std::vector<float> &src, uint32_t w, uint32_t h, float sigma) {
     int radius = std::max(1, int(std::ceil(sigma * 3.0f)));
     std::vector<float> kernel(2 * radius + 1);
@@ -1391,7 +1375,6 @@ static std::vector<float> gaussianBlur(const std::vector<float> &src, uint32_t w
     return dst;
 }
 
-// Standard SSIM on luminance, Gaussian window sigma 1.5, C1/C2 for a [0,1] range.
 static double ssimLuma(const ImageBuffer &a, const ImageBuffer &b) {
     uint32_t w = a.width, h = a.height;
     std::vector<float> x = lumaOf(a), y = lumaOf(b);
@@ -1422,9 +1405,6 @@ static double ssimLuma(const ImageBuffer &a, const ImageBuffer &b) {
     return acc / double(x.size());
 }
 
-// Which part of the image a metric is restricted to. The region of every pixel
-// comes from the reference's own primary-hit id, so it is the ground truth's
-// segmentation, not the approximation's.
 enum class Region : uint8_t { All, Floor, Glass };
 
 static std::vector<uint8_t> regionMaskFromIds(const ImageBuffer &accumWithIds) {
@@ -1433,13 +1413,11 @@ static std::vector<uint8_t> regionMaskFromIds(const ImageBuffer &accumWithIds) {
         uint32_t id = uint32_t(accumWithIds.rgba[i * 4 + 3] + 0.5f);
         if (id == 2u) mask[i] = uint8_t(Region::Floor);
         else if (id >= 10u) mask[i] = uint8_t(Region::Glass);
-        else mask[i] = 255;   // walls, ceiling, sky: neither region
+        else mask[i] = 255;
     }
     return mask;
 }
 
-// `test` against `reference`, both tone mapped into [0,1] display space. SSIM is
-// always global; a windowed index over a scattered pixel set is not meaningful.
 static ImageMetrics compareImages(const ImageBuffer &test, const ImageBuffer &reference,
                                   const std::vector<uint8_t> *mask = nullptr,
                                   Region region = Region::All) {
@@ -1472,8 +1450,6 @@ static ImageMetrics compareImages(const ImageBuffer &test, const ImageBuffer &re
     return m;
 }
 
-// Absolute luminance difference through a blue->red ramp, at a fixed scale so
-// that heat maps from different runs are directly comparable.
 static bool saveErrorHeatmap(const ImageBuffer &test, const ImageBuffer &reference,
                              const std::string &path, float fullScale) {
     uint32_t w = reference.width, h = reference.height;
@@ -1513,23 +1489,19 @@ static bool saveImageBufferToPNG(const ImageBuffer &img, const std::string &path
 }
 
 struct ReferenceResult {
-    ImageBuffer image;              // tone mapped ground truth
-    std::vector<uint8_t> region;    // per-pixel Region, from the reference's primary hit
-    double noiseFloorRmse;          // RMSE between the two independent halves, halved
+    ImageBuffer image;
+    std::vector<uint8_t> region;
+    double noiseFloorRmse;
     double seconds;
     uint32_t spp;
 };
 
-// The accumulator keeps the primary-hit id in alpha, so only RGB is averaged.
 static void normaliseAccumulation(ImageBuffer &accum, uint32_t samples) {
     for (size_t i = 0; i < size_t(accum.width) * accum.height; i++) {
         for (int c = 0; c < 3; c++) accum.rgba[i * 4 + c] /= float(samples);
     }
 }
 
-// Two independent half-runs, averaged in HDR. Splitting them is what gives the
-// reference an honest error bar: a measured RMSE difference of the mode being
-// compared is only meaningful above the reference's own residual noise.
 static ReferenceResult renderReference(RendererState &state, id<MTLTexture> target,
                                        uint32_t optMode, uint32_t spp, uint32_t chunk) {
     uint32_t savedMode = state.renderMode;
@@ -1537,8 +1509,6 @@ static ReferenceResult renderReference(RendererState &state, id<MTLTexture> targ
     uint32_t savedChunk = state.ptSamplesPerLaunch;
     uint32_t savedOptics = state.ptOpticsMode;
 
-    // Transport is always full path tracing; the optical mode only selects the
-    // dispersion strength and the surface roughness the reference should model.
     state.renderMode = 4;
     state.ptOpticsMode = optMode;
 
@@ -1633,7 +1603,6 @@ static void printMetricsRow(const std::string &label, double frameMs, const Regi
     std::cout << line << "\n";
 }
 
-// 1. How far is each real-time mode from a path traced ground truth?
 static int runReferenceComparison(RendererState &state, uint32_t width, uint32_t height,
                                   uint32_t refSpp, uint32_t chunk, const std::vector<uint32_t> &modes) {
     system("mkdir -p output");
@@ -1674,8 +1643,6 @@ static int runReferenceComparison(RendererState &state, uint32_t width, uint32_t
     return 0;
 }
 
-// 2. What does the path tracer get for the same wall clock, and how much does
-//    it need before it is as close to ground truth as the real-time frame is?
 static int runEqualTimeComparison(RendererState &state, uint32_t width, uint32_t height,
                                  uint32_t refSpp, uint32_t chunk, uint32_t maxSpp, uint32_t mode) {
     system("mkdir -p output");
@@ -1704,15 +1671,12 @@ static int runEqualTimeComparison(RendererState &state, uint32_t width, uint32_t
              ref.spp, ref.seconds, ref.noiseFloorRmse);
     std::cout << hdr << "\n";
 
-    // Cost per sample, measured on its own short run. Taking it from the whole
-    // sweep instead would let one stalled dispatch late in the sweep contaminate
-    // the headline equal-time number.
     state.renderMode = 4;
     state.ptOpticsMode = mode;
     state.ptSeedOffset = 101u;
     state.ptSamplesPerLaunch = 1;
     resetPathTraceAccumulation(state);
-    renderFrames(state, target, 2);   // warm up
+    renderFrames(state, target, 2);
     double msPerSpp = 0.0;
     {
         const int kTimingSamples = 4;
@@ -1722,7 +1686,6 @@ static int runEqualTimeComparison(RendererState &state, uint32_t width, uint32_t
         msPerSpp = std::chrono::duration<double, std::milli>(t1 - t0).count() / double(kTimingSamples);
     }
 
-    // Progressive sweep with a seed that does not overlap either reference half.
     state.ptSeedOffset = 4242u;
     state.ptSamplesPerLaunch = 1;
     resetPathTraceAccumulation(state);
@@ -1775,7 +1738,6 @@ static int runEqualTimeComparison(RendererState &state, uint32_t width, uint32_t
         }
     }
 
-    // The image the path tracer would actually have on screen in one frame time.
     uint32_t sppInBudget = std::max(1u, uint32_t(std::llround(rcMs / std::max(1e-9, msPerSpp))));
     state.ptSeedOffset = 909u;
     state.ptSamplesPerLaunch = 1;
@@ -1835,7 +1797,6 @@ static int runEqualTimeComparison(RendererState &state, uint32_t width, uint32_t
     return 0;
 }
 
-// 3. What is each pass actually worth, in milliseconds and in error?
 static int runAblationStudy(RendererState &state, uint32_t width, uint32_t height,
                             uint32_t refSpp, uint32_t chunk, uint32_t mode) {
     system("mkdir -p output");
@@ -1991,7 +1952,6 @@ int runHeadlessBenchmark(RendererState &state) {
                   << "  -> " << outPath << "\n";
     }
 
-    // Mode 4 is progressive, so it is timed per sample rather than per frame.
     {
         const uint32_t spp = 64;
         state.renderMode = 4;
@@ -2085,12 +2045,19 @@ int main(int argc, const char *argv[]) {
                     pos = comma + 1;
                 }
                 if (compareModes.empty()) compareModes = { 1 };
+            } else if (arg == "--1080p" || arg == "--1080") {
+                gRenderer.targetRenderWidth = 1920;
+                gRenderer.targetRenderHeight = 1080;
+                gRenderer.forceFixedResolution = true;
             } else if (arg == "--res" && i + 1 < argc) {
                 std::string res = argv[++i];
                 size_t x = res.find('x');
                 if (x != std::string::npos) {
                     cmpWidth = uint32_t(std::max(64, atoi(res.substr(0, x).c_str())));
                     cmpHeight = uint32_t(std::max(64, atoi(res.substr(x + 1).c_str())));
+                    gRenderer.targetRenderWidth = cmpWidth;
+                    gRenderer.targetRenderHeight = cmpHeight;
+                    gRenderer.forceFixedResolution = true;
                 }
             } else if (arg == "--glass-bounces" && i + 1 < argc) {
                 gRenderer.glassBounces = uint32_t(std::min(8, std::max(1, atoi(argv[++i]))));
